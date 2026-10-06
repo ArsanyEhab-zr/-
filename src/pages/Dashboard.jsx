@@ -161,7 +161,7 @@ export default function Dashboard() {
                         )}
                         <div className="flex items-center gap-3">
                             {appSettings.osraLogo ? (
-                                <img src={appSettings.osraLogo} width="40" height="40" loading="eager" fetchpriority="high" className="w-10 h-10 rounded-full object-cover border-2 border-slate-700" alt="لوجو الأسرة" />
+                                <img src={appSettings.osraLogo} width="40" height="40" loading="eager" fetchpriority="high" className="w-10 h-10 rounded-full object-contain p-1 border-2 border-slate-700 bg-transparent" alt="لوجو الأسرة" />
                             ) : (
                                 <DatabaseBackup className="text-indigo-400" size={24} />
                             )}
