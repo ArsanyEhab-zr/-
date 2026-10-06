@@ -1,0 +1,10 @@
+{
+  "short_name": "Ⲕⲟⲓⲛⲱⲛⲓⲁ",
+  "name": "مَدْرَسَةُ كِينُونْيَا لِلشَّمَامِسَةِ وَالأَلْحَانِ",
+  "description": "تطبيق إدارة الحضور والغياب للخدمة",
+  "start_url": "/",
+  "display": "standalone",
+  "dir": "rtl",
+  "theme_color": "#ffffff",
+  "background_color": "#ffffff"
+}
