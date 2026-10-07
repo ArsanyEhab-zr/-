@@ -1,6 +1,6 @@
 // src/db/firebase.js
 import { initializeApp } from "firebase/app";
-import { getFirestore, initializeFirestore, persistentLocalCache } from "firebase/firestore";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, terminate, clearIndexedDbPersistence } from "firebase/firestore";
 import { getAnalytics } from "firebase/analytics";
 import { getStorage } from "firebase/storage";
 // (App Check removed for pure clean connection)// 🌟 بيانات سيرفرك إنت يا هندسة (Khedmety App)
@@ -21,10 +21,21 @@ const app = initializeApp(firebaseConfig);
 export const analytics = getAnalytics(app);
 
 // 4. 🌟 تشغيل وتصدير قاعدة البيانات بالاسمين عشان نرضي كل ملفات المشروع!
-// 🌟 تفعيل قاعدة البيانات الأوفلاين (Offline Persistence) كشرط أساسي للأداء باستخدام API الجديد
+// 🌟 تفعيل قاعدة البيانات الأوفلاين (Offline Persistence) بشكل آمن - Modern V9+ API
 export const db = initializeFirestore(app, {
-  localCache: persistentLocalCache()
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
 });
+
+// 🧹 مسح الكاش بالكامل في حالة وجود داتا مشفرة قديمة
+export const clearFirebaseCache = async () => {
+    try {
+        await terminate(db);
+        await clearIndexedDbPersistence(db);
+        window.location.reload();
+    } catch (error) {
+        // Silently fail to keep console perfectly clean
+    }
+};
 
 export const firestore = db; // السطر ده هيخلي ملف sync.js يشتغل فوراً
 

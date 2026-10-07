@@ -33,21 +33,29 @@ export default function Home() {
         });
         return () => unsubscribe();
     }, []);
-    const currentSyncKey = String(localStorage.getItem('currentSyncKey') || '');
 
-    // 🌟 جلب بيانات الخادم من التخزين المحلي
-    const currentServant = JSON.parse(localStorage.getItem('currentServant') || '{}');
+    // 🔥 Hydration state for Auth/Local Data
+    const [isHydrating, setIsHydrating] = useState(true);
 
-    // 🌟 تحديد صلاحيات الخادم (ماستر أو كاهن أو أمين خدمة أو أدمن مساعد)
-    const isMaster = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE' || currentSyncKey === 'STAGE_ADMIN';
-    const isLeadership = isMaster || currentServant.role === 'كاهن' || currentServant.role === 'أمين أسرة' || currentServant.role === 'أدمن مساعد' || currentServant.role === 'أمين مرحلة';
+    const [authState, setAuthState] = useState(() => {
+        const syncKey = String(localStorage.getItem('currentSyncKey') || '');
+        let servant = {};
+        try { servant = JSON.parse(localStorage.getItem('currentServant') || '{}'); } catch (e) {}
+        
+        const master = syncKey === 'MASTER_ACCESS' || syncKey === 'ADMIN_MODE' || syncKey === 'STAGE_ADMIN';
+        const leadership = master || servant.role === 'كاهن' || servant.role === 'أمين أسرة' || servant.role === 'أدمن مساعد' || servant.role === 'أمين مرحلة';
+        
+        return { currentSyncKey: syncKey, currentServant: servant, isMaster: master, isLeadership: leadership };
+    });
+
+    const { currentSyncKey, currentServant, isMaster, isLeadership } = authState;
 
     // 🌟 جلب إعدادات الكنيسة والخدمة
     const [appSettings, setAppSettings] = useState({ khedmaName: "الخدمة", osraName: "الأسرة", osraLogo: "", khedmaLogo: "" });
     const [todaysLesson, setTodaysLesson] = useState(null);
     const [curriculumPdfUrl, setCurriculumPdfUrl] = useState("");
 
-    const [activeWidget, setActiveWidget] = useState(localStorage.getItem('preferredWidget') || 'BIRTHDAYS');
+    const [activeWidget, setActiveWidget] = useState(() => localStorage.getItem('preferredWidget') || 'BIRTHDAYS');
 
     const targetDate = useMemo(() => {
         const d = new Date();
@@ -151,6 +159,7 @@ export default function Home() {
 
             } catch (e) { console.error("Error reading settings", e); }
         }
+        setIsHydrating(false);
     }, [targetDate, currentSyncKey, isMaster]);
 
 
@@ -300,7 +309,7 @@ export default function Home() {
         }
         return [];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isMaster]);
+    }, [isMaster, currentServant, currentServant?.role, currentServant?.allowedClasses, isHydrating]);
 
     const handleEnterOsra = (osra) => {
         localStorage.setItem('masterSyncKey', currentSyncKey);
@@ -319,6 +328,31 @@ export default function Home() {
     };
 
     // SmartRadar & SmartWidget logic refactored into main render return
+
+    if (isHydrating) {
+        return (
+            <div className="fixed inset-0 z-50 bg-gradient-to-br from-indigo-900 via-indigo-950 to-slate-900 flex flex-col items-center justify-center min-h-screen p-4" dir="rtl">
+                <div className="relative flex flex-col items-center animate-in fade-in zoom-in duration-700">
+                    <div className="w-32 h-32 mb-8 relative">
+                        <div className="absolute inset-0 bg-amber-400 rounded-full blur-2xl opacity-20 animate-pulse"></div>
+                        <img src="/logo.png" alt="Koinonia Logo" className="w-full h-full object-contain relative z-10 drop-shadow-2xl" onError={(e) => { e.target.style.display = 'none' }} />
+                    </div>
+                    <h1 className="text-3xl font-black text-white mb-2 tracking-wide">كينـونـيـا</h1>
+                    <p className="text-indigo-200/80 font-medium text-sm mb-8 animate-pulse">جاري تحميل البيانات...</p>
+                    
+                    <div className="w-48 h-1.5 bg-indigo-950/50 rounded-full overflow-hidden border border-indigo-500/20 shadow-inner">
+                        <div className="h-full bg-gradient-to-r from-amber-400 to-amber-500 w-1/2 animate-[progress_1.5s_ease-in-out_infinite] rounded-full"></div>
+                    </div>
+                </div>
+                <style>{`
+                    @keyframes progress {
+                        0% { transform: translateX(200%); }
+                        100% { transform: translateX(-100%); }
+                    }
+                `}</style>
+            </div>
+        );
+    }
 
     return (
         <div className="min-h-screen bg-slate-50 relative overflow-x-hidden font-sans pb-10" dir="rtl">

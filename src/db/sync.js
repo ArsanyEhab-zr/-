@@ -1,6 +1,6 @@
 import { db } from './database';
 import { firestore } from './firebase';
-import { collection, collectionGroup, getDocs, doc, setDoc, deleteDoc, getDoc } from 'firebase/firestore';
+import { collection, collectionGroup, getDocs, doc, setDoc, deleteDoc, getDoc, getDocFromServer } from 'firebase/firestore';
 
 // 🌟 استدعاء دوال التشفير وفك التشفير اللي عملناهم
 import { encryptData, decryptData } from '../encryption';
@@ -56,9 +56,14 @@ const _syncDataWithCloud = async () => {
         const currentServantObj = JSON.parse(localStorage.getItem('currentServant') || '{}');
         const allowedClasses = currentServantObj.allowedClasses || [];
 
-        // 🌟 2. سحب إعدادات الكنيسة والخدام (System Settings)
+        // 🌟 2. سحب إعدادات الكنيسة والخدام (System Settings) - FORCE FROM SERVER
         const settingsRef = doc(firestore, 'System', 'mainConfig');
-        const settingsSnap = await getDoc(settingsRef);
+        let settingsSnap;
+        try {
+            settingsSnap = await getDocFromServer(settingsRef); // جلب من السيرفر مباشرة لتفادي الكاش القديم
+        } catch (e) {
+            settingsSnap = await getDoc(settingsRef); // لو مفيش نت، نرجع للكاش
+        }
         
         if (settingsSnap.exists()) {
             const cloudSettings = settingsSnap.data();
@@ -126,13 +131,29 @@ const _syncDataWithCloud = async () => {
         let cloudChildren = [];
         let cloudAttendance = [];
         let cloudEvents = [];
+        let decryptionErrorsCount = 0;
 
         const processCloudDoc = (doc) => {
+            if (!doc || typeof doc.data !== 'function') return null;
             if (doc.id === '_placeholder') return null;
             const rawData = doc.data();
+            if (!rawData) return null;
             if (rawData.placeholder || rawData.isPlaceholder) return null;
-            const data = rawData.payload ? decryptData(rawData.payload) : rawData;
-            if (data && !data.id && doc.id !== '_placeholder') data.id = doc.id;
+            
+            let data = null;
+            if (rawData.payload) {
+                data = decryptData(rawData.payload);
+                if (!data) {
+                    decryptionErrorsCount++;
+                    return null; // Safely ignore if decryption failed
+                }
+            } else {
+                data = rawData;
+            }
+            
+            if (data && typeof data === 'object' && !data.id && doc.id !== '_placeholder') {
+                data.id = doc.id;
+            }
             return data;
         };
 
@@ -175,6 +196,18 @@ const _syncDataWithCloud = async () => {
                 ...(globalEventsSnapshot?.docs || []).map(processCloudDoc).filter(Boolean)
             ];
             
+        }
+
+        // 🔥 التفريغ الإجباري للكاش لو لقينا أخطاء فك تشفير
+        if (decryptionErrorsCount > 0) {
+            if (!sessionStorage.getItem('cache_cleared')) {
+                sessionStorage.setItem('cache_cleared', 'true');
+                const { clearFirebaseCache } = await import('./firebase');
+                await clearFirebaseCache();
+                return { success: false, message: "جاري تنظيف الذاكرة وتحديث البيانات..." };
+            }
+        } else {
+            sessionStorage.removeItem('cache_cleared');
         }
 
         // تحويل داتا الكلاود لخرائط (Maps) عشان المقارنة تبقى بسرعة الصاروخ

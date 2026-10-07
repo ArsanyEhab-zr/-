@@ -99,7 +99,14 @@ export default function Login() {
         try {
             // 🌟🌟🌟 التعديل السحري هنا: السحب من mainConfig (اللي فيه الخدام الجداد) 🌟🌟🌟
             const configRef = doc(firestore, 'System', 'mainConfig');
-            const configSnap = await getDoc(configRef);
+            let configSnap;
+            try {
+                // استيرادها محلياً هنا لتفادي تغيير الترويسة
+                const { getDocFromServer } = await import('firebase/firestore');
+                configSnap = await getDocFromServer(configRef);
+            } catch (e) {
+                configSnap = await getDoc(configRef); // Fallback to cache if offline
+            }
 
             let servantsList = [];
 
