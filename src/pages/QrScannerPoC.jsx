@@ -58,7 +58,7 @@ export default function QrScannerPoC() {
     const navigate = useNavigate();
     const scannerRef = useRef(null);
     const scannedIdsRef = useRef(new Set());
-    const cooldownRef = useRef(new Map()); // childId → timestamp for 500ms cooldown
+    const scanLockRef = useRef(false); // Global lock for 1500ms after any scan
     const containerIdRef = useRef('qr-reader-container');
 
     const [isActive, setIsActive] = useState(false);
@@ -68,6 +68,7 @@ export default function QrScannerPoC() {
     const [cameraError, setCameraError] = useState(null);
     const [isMuted, setIsMuted] = useState(false);
     const [isStarting, setIsStarting] = useState(false);
+    const [isProcessing, setIsProcessing] = useState(false);
 
     // ─── Toast helper ───
     const showToast = useCallback((message, type = 'success') => {
@@ -83,10 +84,16 @@ export default function QrScannerPoC() {
 
     // ─── Handle successful QR decode ───
     const handleScanSuccess = useCallback((decodedText) => {
+        if (scanLockRef.current) return;
+
         const parsed = parseQrCode(decodedText);
 
         if (!parsed) {
             // Not a valid QR code
+            scanLockRef.current = true;
+            setIsProcessing(true);
+            setTimeout(() => { scanLockRef.current = false; setIsProcessing(false); }, 1500);
+
             triggerFlash('red');
             showToast('⚠️ كود QR غير صالح — ' + TENANT_CONFIG.QR_INVALID_MESSAGE, 'error');
             if (!isMuted) playBeep(300, 150, 0.2);
@@ -96,25 +103,36 @@ export default function QrScannerPoC() {
         const { childId } = parsed;
         const now = Date.now();
 
-        // Cooldown check — prevent rapid re-fire of the same card within 500ms
-        const lastScan = cooldownRef.current.get(childId);
-        if (lastScan && now - lastScan < 500) return;
-        cooldownRef.current.set(childId, now);
-
         // Duplicate check
         if (scannedIdsRef.current.has(childId)) {
+            scanLockRef.current = true;
+            setIsProcessing(true);
+            setTimeout(() => { scanLockRef.current = false; setIsProcessing(false); }, 1500);
+
             triggerFlash('amber');
             showToast(`⚠️ تم مسح الـ ID ${childId} بالفعل`, 'warning');
             if (!isMuted) playBeep(400, 120, 0.2);
             return;
         }
 
-        // ✅ New successful scan
+        // Apply lock immediately to prevent double-scans of the same card
+        scanLockRef.current = true;
+        setIsProcessing(true);
+        
+        // Add to scanned set early to prevent duplicate reads passing the check above
         scannedIdsRef.current.add(childId);
+
+        // ✅ New successful scan
         setScannedList(prev => [{ childId, raw: parsed.raw, timestamp: now }, ...prev]);
         triggerFlash('green');
         showToast(`✅ تم مسح ID: ${childId}`, 'success');
         if (!isMuted) playBeep(1200, 80, 0.3);
+
+        // Release lock after 1500ms cooldown
+        setTimeout(() => { 
+            scanLockRef.current = false; 
+            setIsProcessing(false);
+        }, 1500);
     }, [isMuted, triggerFlash, showToast]);
 
     // ─── Start camera ───
@@ -139,8 +157,35 @@ export default function QrScannerPoC() {
             const viewportWidth = Math.min(window.innerWidth - 32, 500);
             const qrboxSize = Math.floor(viewportWidth * 0.65);
 
+            // Try to find the best standard back camera (avoiding ultrawide)
+            let cameraConfig = { facingMode: 'environment' };
+            try {
+                const devices = await Html5Qrcode.getCameras();
+                if (devices && devices.length > 0) {
+                    const backCameras = devices.filter(d => 
+                        d.label.toLowerCase().includes('back') || 
+                        d.label.toLowerCase().includes('environment')
+                    );
+                    
+                    if (backCameras.length > 0) {
+                        // Avoid lenses with 'wide' or 'ultrawide' in their name
+                        const standardCamera = backCameras.find(d => !d.label.toLowerCase().includes('wide'));
+                        if (standardCamera) {
+                            cameraConfig = standardCamera.id;
+                        } else {
+                            cameraConfig = backCameras[0].id;
+                        }
+                    } else if (!devices.find(d => d.label.toLowerCase().includes('front'))) {
+                         // If we can't identify back cameras but there are cameras, try to just pick one that isn't clearly front
+                         cameraConfig = devices[0].id;
+                    }
+                }
+            } catch (err) {
+                console.warn('Could not enumerate cameras, falling back to facingMode: environment', err);
+            }
+
             await html5QrCode.start(
-                { facingMode: 'environment' },
+                cameraConfig,
                 {
                     fps: 15,
                     qrbox: { width: qrboxSize, height: qrboxSize },
@@ -191,14 +236,12 @@ export default function QrScannerPoC() {
     // ─── Remove item from scanned list ───
     const removeItem = useCallback((childId) => {
         scannedIdsRef.current.delete(childId);
-        cooldownRef.current.delete(childId);
         setScannedList(prev => prev.filter(item => item.childId !== childId));
     }, []);
 
     // ─── Clear all scanned ───
     const clearAll = useCallback(() => {
         scannedIdsRef.current.clear();
-        cooldownRef.current.clear();
         setScannedList([]);
     }, []);
 
@@ -273,6 +316,26 @@ export default function QrScannerPoC() {
                                     'bg-red-500/30'
                                 }`}
                             />
+                        )}
+
+                        {/* Processing Lock Overlay */}
+                        {isProcessing && isActive && toastMessage && (
+                            <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-900/40 backdrop-blur-[2px] rounded-3xl animate-in fade-in duration-200">
+                                <div className="bg-slate-900/90 text-white px-5 py-3 rounded-2xl flex items-center gap-3 shadow-xl border border-slate-700">
+                                    {toastMessage.type === 'success' ? (
+                                        <CheckCircle2 size={24} className="text-emerald-400" />
+                                    ) : toastMessage.type === 'warning' ? (
+                                        <AlertTriangle size={24} className="text-amber-400" />
+                                    ) : (
+                                        <XCircle size={24} className="text-red-400" />
+                                    )}
+                                    <span className="font-black text-sm">
+                                        {toastMessage.type === 'success' ? 'تم التسجيل' : 
+                                         toastMessage.type === 'warning' ? 'مسجل بالفعل' : 
+                                         'كود غير صالح'}
+                                    </span>
+                                </div>
+                            </div>
                         )}
 
                         {/* ─── Idle State (Camera Off) ─── */}

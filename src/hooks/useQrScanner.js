@@ -76,7 +76,7 @@ function parseQrCode(rawText) {
 export default function useQrScanner() {
     const scannerRef = useRef(null);
     const scannedIdsRef = useRef(new Set());
-    const cooldownRef = useRef(new Map()); // childId → timestamp for 500ms cooldown
+    const scanLockRef = useRef(false); // Global lock for 1500ms after any scan
     const containerIdRef = useRef('qr-reader-container');
 
     const [isActive, setIsActive] = useState(false);
@@ -86,6 +86,7 @@ export default function useQrScanner() {
     const [cameraError, setCameraError] = useState(null);
     const [isMuted, setIsMuted] = useState(false);
     const [isStarting, setIsStarting] = useState(false);
+    const [isProcessing, setIsProcessing] = useState(false);
 
     // ─── Toast helper ───
     const showToast = useCallback((message, type = 'success') => {
@@ -114,10 +115,16 @@ export default function useQrScanner() {
 
     // ─── Handle successful QR decode ───
     const handleScanSuccess = useCallback(async (decodedText) => {
+        if (scanLockRef.current) return;
+
         const parsed = parseQrCode(decodedText);
 
         if (!parsed) {
             // Not a valid QR code
+            scanLockRef.current = true;
+            setIsProcessing(true);
+            setTimeout(() => { scanLockRef.current = false; setIsProcessing(false); }, 1500);
+
             triggerFlash('red');
             showToast('⚠️ كود QR غير صالح — ' + TENANT_CONFIG.QR_INVALID_MESSAGE, 'error');
             if (!isMuted) playBeep(300, 150, 0.2);
@@ -127,26 +134,38 @@ export default function useQrScanner() {
         const { childId } = parsed;
         const now = Date.now();
 
-        // Cooldown check — prevent rapid re-fire of the same card within 500ms
-        const lastScan = cooldownRef.current.get(childId);
-        if (lastScan && now - lastScan < 500) return;
-        cooldownRef.current.set(childId, now);
-
         // Duplicate check
         if (scannedIdsRef.current.has(childId)) {
+            scanLockRef.current = true;
+            setIsProcessing(true);
+            setTimeout(() => { scanLockRef.current = false; setIsProcessing(false); }, 1500);
+
             triggerFlash('amber');
             showToast(`⚠️ تم مسح هذا المخدوم بالفعل`, 'warning');
             if (!isMuted) playBeep(400, 120, 0.2);
             return;
         }
 
+        // Apply lock immediately to prevent double-scans of the same card during DB resolution
+        scanLockRef.current = true;
+        setIsProcessing(true);
+        
+        // Add to scanned set early to prevent duplicate reads passing the check above
+        scannedIdsRef.current.add(childId);
+
         // ✅ New successful scan — resolve name from Dexie
         const { name, gender } = await resolveChildName(childId);
-        scannedIdsRef.current.add(childId);
+        
         setScannedList(prev => [{ childId, raw: parsed.raw, name, gender, timestamp: now }, ...prev]);
         triggerFlash('green');
         showToast(`✅ ${name}`, 'success');
         if (!isMuted) playSuccessChime();
+
+        // Release lock after 1500ms cooldown
+        setTimeout(() => { 
+            scanLockRef.current = false; 
+            setIsProcessing(false);
+        }, 1500);
     }, [isMuted, triggerFlash, showToast, resolveChildName]);
 
     // ─── Start camera ───
@@ -171,8 +190,35 @@ export default function useQrScanner() {
             const viewportWidth = Math.min(window.innerWidth - 32, 500);
             const qrboxSize = Math.floor(viewportWidth * 0.65);
 
+            // Try to find the best standard back camera (avoiding ultrawide)
+            let cameraConfig = { facingMode: 'environment' };
+            try {
+                const devices = await Html5Qrcode.getCameras();
+                if (devices && devices.length > 0) {
+                    const backCameras = devices.filter(d => 
+                        d.label.toLowerCase().includes('back') || 
+                        d.label.toLowerCase().includes('environment')
+                    );
+                    
+                    if (backCameras.length > 0) {
+                        // Avoid lenses with 'wide' or 'ultrawide' in their name
+                        const standardCamera = backCameras.find(d => !d.label.toLowerCase().includes('wide'));
+                        if (standardCamera) {
+                            cameraConfig = standardCamera.id;
+                        } else {
+                            cameraConfig = backCameras[0].id;
+                        }
+                    } else if (!devices.find(d => d.label.toLowerCase().includes('front'))) {
+                         // If we can't identify back cameras but there are cameras, try to just pick one that isn't clearly front
+                         cameraConfig = devices[0].id;
+                    }
+                }
+            } catch (err) {
+                console.warn('Could not enumerate cameras, falling back to facingMode: environment', err);
+            }
+
             await html5QrCode.start(
-                { facingMode: 'environment' },
+                cameraConfig,
                 {
                     fps: 15,
                     qrbox: { width: qrboxSize, height: qrboxSize },
@@ -223,14 +269,12 @@ export default function useQrScanner() {
     // ─── Remove item from scanned list ───
     const removeItem = useCallback((childId) => {
         scannedIdsRef.current.delete(childId);
-        cooldownRef.current.delete(childId);
         setScannedList(prev => prev.filter(item => item.childId !== childId));
     }, []);
 
     // ─── Clear all scanned ───
     const clearAll = useCallback(() => {
         scannedIdsRef.current.clear();
-        cooldownRef.current.clear();
         setScannedList([]);
     }, []);
 
@@ -261,6 +305,7 @@ export default function useQrScanner() {
         // State
         isActive,
         isStarting,
+        isProcessing,
         scannedList,
         flashColor,
         toastMessage,

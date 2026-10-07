@@ -4,7 +4,7 @@ import React, { useState, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
-import { Search, Church, BookOpen, CheckCheck, X, MessageCircleWarning, History, UserMinus, UserCheck, Calendar } from 'lucide-react';
+import { Search, Church, BookOpen, CheckCheck, X, MessageCircleWarning, History, UserMinus, UserCheck, Calendar, Music } from 'lucide-react';
 import useAutoSync from '../hooks/useAutoSync';
 import BottomNav from '../components/BottomNav';
 
@@ -83,6 +83,7 @@ export default function Attendance() {
 
     const liturgyCount = attendanceRecords?.filter(a => a.type === 'liturgy' && filteredChildren.some(c => c.id === a.childId)).length || 0;
     const serviceCount = attendanceRecords?.filter(a => a.type === 'service' && filteredChildren.some(c => c.id === a.childId)).length || 0;
+    const tasbehaCount = attendanceRecords?.filter(a => a.type === 'tasbeha' && filteredChildren.some(c => c.id === a.childId)).length || 0;
 
     const getReportData = () => {
         let list = [];
@@ -94,6 +95,8 @@ export default function Attendance() {
             list = (children || []).filter(c => getAttendanceStatus(c.id, 'service') === 'present');
         } else if (modalState.type === 'liturgy') {
             list = (children || []).filter(c => getAttendanceStatus(c.id, 'liturgy') === 'present');
+        } else if (modalState.type === 'tasbeha') {
+            list = (children || []).filter(c => getAttendanceStatus(c.id, 'tasbeha') === 'present');
         }
 
         return {
@@ -120,7 +123,7 @@ export default function Attendance() {
                     // Clicking the same status removes it
                     await db.attendance.update(currentRecord.id, { isDeleted: true, isDirty: true, updatedAt: now });
                     if (status === 'present') {
-                        const field = type === 'liturgy' ? 'last_liturgy' : 'last_service';
+                        const field = type === 'liturgy' ? 'last_liturgy' : type === 'tasbeha' ? 'last_tasbeha' : 'last_service';
                         if (child[field] === selectedDate) updates[field] = null;
                         if (activeRecords.length === 1) updates.streak = Math.max((child.streak || 0) - 1, 0);
                     }
@@ -128,7 +131,7 @@ export default function Attendance() {
                     // Update existing record
                     await db.attendance.update(currentRecord.id, { status, isDirty: true, updatedAt: now });
                     if (status === 'present') {
-                        const field = type === 'liturgy' ? 'last_liturgy' : 'last_service';
+                        const field = type === 'liturgy' ? 'last_liturgy' : type === 'tasbeha' ? 'last_tasbeha' : 'last_service';
                         if (!child[field] || selectedDate >= child[field]) updates[field] = selectedDate;
                     }
                 }
@@ -146,7 +149,7 @@ export default function Attendance() {
                 });
                 
                 if (status === 'present') {
-                    const field = type === 'liturgy' ? 'last_liturgy' : 'last_service';
+                    const field = type === 'liturgy' ? 'last_liturgy' : type === 'tasbeha' ? 'last_tasbeha' : 'last_service';
                     if (!child[field] || selectedDate >= child[field]) updates[field] = selectedDate;
                     if (activeRecords.length === 0) updates.streak = (child.streak || 0) + 1;
                 }
@@ -233,7 +236,7 @@ export default function Attendance() {
                     <div className="flex justify-between items-center px-1">
                         <h3 className="text-sm font-black text-slate-800 flex items-center gap-2"><History size={16} className="text-indigo-500" /> تقارير يوم ({selectedDate})</h3>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 w-full">
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 w-full">
                         <button onClick={() => setModalState({ isOpen: true, type: 'absent' })} className="bg-red-700 text-red-50 border border-red-800 py-2.5 rounded-xl text-[11px] font-black hover:bg-red-800 active:scale-95 transition-all flex items-center justify-center gap-1.5">
                             <UserMinus size={16} /> المتبقين / غياب
                         </button>
@@ -243,12 +246,16 @@ export default function Attendance() {
                         <button onClick={() => setModalState({ isOpen: true, type: 'liturgy' })} className="bg-yellow-600 text-yellow-50 border border-yellow-700 py-2.5 rounded-xl text-[11px] font-black hover:bg-yellow-700 active:scale-95 transition-all flex items-center justify-center gap-1.5">
                             <Church size={16} /> حضور القداس
                         </button>
+                        <button onClick={() => setModalState({ isOpen: true, type: 'tasbeha' })} className="bg-purple-600 text-purple-50 border border-purple-700 py-2.5 rounded-xl text-[11px] font-black hover:bg-purple-700 active:scale-95 transition-all flex items-center justify-center gap-1.5">
+                            <Music size={16} /> حضور التسبحة
+                        </button>
                     </div>
                 </div>
 
                 <div className="flex gap-3 mb-6">
                     <div className="flex-1 bg-blue-50 p-3 rounded-2xl border border-blue-100 flex justify-between items-center"><span className="text-blue-700 font-black text-sm flex gap-1"><Church size={18} /> قداس</span><span className="bg-blue-500 text-white px-2 py-0.5 rounded-md text-xs">{liturgyCount}</span></div>
                     <div className="flex-1 bg-green-50 p-3 rounded-2xl border border-green-100 flex justify-between items-center"><span className="text-green-700 font-black text-sm flex gap-1"><BookOpen size={18} /> خدمة</span><span className="bg-green-500 text-white px-2 py-0.5 rounded-md text-xs">{serviceCount}</span></div>
+                    <div className="flex-1 bg-purple-50 p-3 rounded-2xl border border-purple-100 flex justify-between items-center"><span className="text-purple-700 font-black text-sm flex gap-1"><Music size={18} /> تسبحة</span><span className="bg-purple-500 text-white px-2 py-0.5 rounded-md text-xs">{tasbehaCount}</span></div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -263,6 +270,7 @@ export default function Attendance() {
                             </div>
                             <div className="flex gap-2 mb-2">
                                 <button onClick={() => setAttendanceStatus(child, 'liturgy', 'present')} className={`flex-1 py-2.5 rounded-xl font-black text-xs flex items-center justify-center gap-1 transition-colors ${getAttendanceStatus(child.id, 'liturgy') === 'present' ? 'bg-blue-500 text-white shadow-sm' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'}`}><Church size={14} /> القداس</button>
+                                <button onClick={() => setAttendanceStatus(child, 'tasbeha', 'present')} className={`flex-1 py-2.5 rounded-xl font-black text-xs flex items-center justify-center gap-1 transition-colors ${getAttendanceStatus(child.id, 'tasbeha') === 'present' ? 'bg-purple-500 text-white shadow-sm' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'}`}><Music size={14} /> التسبحة</button>
                             </div>
                             <div className="flex gap-2">
                                 <button onClick={() => setAttendanceStatus(child, 'service', 'present')} className={`flex-1 py-2.5 rounded-xl font-black text-xs flex items-center justify-center gap-1 transition-colors ${getAttendanceStatus(child.id, 'service') === 'present' ? 'bg-green-500 text-white shadow-sm' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'}`}>✅ حضور</button>
@@ -282,10 +290,11 @@ export default function Attendance() {
 
                         <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
                             <h2 className={`text-lg font-black flex items-center gap-2 
-                                ${modalState.type === 'absent' ? 'text-red-600' : modalState.type === 'service' ? 'text-green-600' : 'text-yellow-600'}`}>
+                                ${modalState.type === 'absent' ? 'text-red-600' : modalState.type === 'service' ? 'text-green-600' : modalState.type === 'tasbeha' ? 'text-purple-600' : 'text-yellow-600'}`}>
                                 {modalState.type === 'absent' && <><UserMinus size={20} /> تقرير غياب</>}
                                 {modalState.type === 'service' && <><BookOpen size={20} /> تقرير حضور الخدمة</>}
                                 {modalState.type === 'liturgy' && <><Church size={20} /> تقرير حضور القداس</>}
+                                {modalState.type === 'tasbeha' && <><Music size={20} /> تقرير حضور التسبحة</>}
                             </h2>
                             <button onClick={() => setModalState({ isOpen: false, type: null })} aria-label="إغلاق" className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:bg-slate-200 transition-colors"><X size={16} /></button>
                         </div>

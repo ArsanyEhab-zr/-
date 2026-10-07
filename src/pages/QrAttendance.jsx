@@ -7,7 +7,7 @@ import useAutoSync from '../hooks/useAutoSync';
 import {
     Camera, CameraOff, Trash2, ArrowRight, Volume2, VolumeX,
     RotateCcw, ScanLine, CheckCircle2, XCircle, X,
-    Church, BookOpen, Calendar, ChevronLeft, Save,
+    Church, BookOpen, Calendar, ChevronLeft, Save, Music,
     Users, QrCode, ClipboardList, Sparkles, PartyPopper, Loader2
 } from 'lucide-react';
 
@@ -23,6 +23,7 @@ const STAGE = {
 const EVENT_TYPES = [
     { id: 'liturgy', label: 'القداس', icon: Church, color: 'from-blue-600 to-indigo-600', bg: 'bg-blue-500/10', border: 'border-blue-500/20', text: 'text-blue-400', emoji: '⛪' },
     { id: 'service', label: 'الخدمة', icon: BookOpen, color: 'from-emerald-600 to-teal-600', bg: 'bg-emerald-500/10', border: 'border-emerald-500/20', text: 'text-emerald-400', emoji: '📖' },
+    { id: 'tasbeha', label: 'التسبحة', icon: Music, color: 'from-purple-600 to-fuchsia-600', bg: 'bg-purple-500/10', border: 'border-purple-500/20', text: 'text-purple-400', emoji: '🎵' },
 ];
 
 // ─────────────────────────────────────────────
@@ -34,7 +35,7 @@ export default function QrAttendance() {
 
     // ─── Session Config State ───
     const [stage, setStage] = useState(STAGE.CONFIG);
-    const [eventType, setEventType] = useState(null); // 'liturgy' | 'service'
+    const [eventType, setEventType] = useState(null); // 'liturgy' | 'service' | 'tasbeha'
     const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0]);
 
     // ─── Save State ───
@@ -76,7 +77,7 @@ export default function QrAttendance() {
         try {
             const currentSyncKey = localStorage.getItem('currentSyncKey');
             const now = new Date().toISOString();
-            const type = eventType; // 'liturgy' | 'service'
+            const type = eventType; // 'liturgy' | 'service' | 'tasbeha'
             const date = selectedDate;
             const childIds = scanner.scannedList.map(item => item.childId);
 
@@ -118,10 +119,10 @@ export default function QrAttendance() {
                         isDeleted: false,
                     });
 
-                    // 2. Update child record (streak + last_liturgy/last_service)
+                    // 2. Update child record (streak + last_liturgy/last_service/last_tasbeha)
                     const child = await db.children.get(childId);
                     if (child && !child.isDeleted) {
-                        const field = type === 'liturgy' ? 'last_liturgy' : 'last_service';
+                        const field = type === 'liturgy' ? 'last_liturgy' : type === 'tasbeha' ? 'last_tasbeha' : 'last_service';
                         const updates = {
                             isDirty: true,
                             updatedAt: now,
@@ -265,7 +266,7 @@ export default function QrAttendance() {
                                             onClick={() => setEventType(evt.id)}
                                             className={`relative overflow-hidden rounded-2xl p-5 border-2 transition-all duration-200 active:scale-95 ${
                                                 isSelected
-                                                    ? `bg-gradient-to-br ${evt.color} border-transparent shadow-xl shadow-${evt.id === 'liturgy' ? 'blue' : 'emerald'}-500/25 scale-[1.02]`
+                                                    ? `bg-gradient-to-br ${evt.color} border-transparent shadow-xl shadow-${evt.id === 'liturgy' ? 'blue' : evt.id === 'tasbeha' ? 'purple' : 'emerald'}-500/25 scale-[1.02]`
                                                     : 'bg-slate-800/80 border-slate-700 hover:border-slate-600'
                                             }`}
                                         >
@@ -366,6 +367,26 @@ export default function QrAttendance() {
                                             'bg-red-500/30'
                                         }`}
                                     />
+                                )}
+
+                                {/* Processing Lock Overlay */}
+                                {scanner.isProcessing && scanner.isActive && scanner.toastMessage && (
+                                    <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-900/40 backdrop-blur-[2px] rounded-3xl animate-in fade-in duration-200">
+                                        <div className="bg-slate-900/90 text-white px-5 py-3 rounded-2xl flex items-center gap-3 shadow-xl border border-slate-700">
+                                            {scanner.toastMessage.type === 'success' ? (
+                                                <CheckCircle2 size={24} className="text-emerald-400" />
+                                            ) : scanner.toastMessage.type === 'warning' ? (
+                                                <XCircle size={24} className="text-amber-400" />
+                                            ) : (
+                                                <XCircle size={24} className="text-red-400" />
+                                            )}
+                                            <span className="font-black text-sm">
+                                                {scanner.toastMessage.type === 'success' ? 'تم التسجيل' : 
+                                                 scanner.toastMessage.type === 'warning' ? 'مسجل بالفعل' : 
+                                                 'كود غير صالح'}
+                                            </span>
+                                        </div>
+                                    </div>
                                 )}
 
                                 {/* Idle State (Camera Off) */}

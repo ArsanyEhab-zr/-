@@ -285,11 +285,13 @@ function StatsView({ childrenData, appSettings }) {
     const attendanceStats = monthFridays.map((friday, index) => {
         const serviceCount = attendanceData.filter(a => a.date === friday && a.type === 'service').length;
         const liturgyCount = attendanceData.filter(a => a.date === friday && a.type === 'liturgy').length;
+        const tasbehaCount = attendanceData.filter(a => a.date === friday && a.type === 'tasbeha').length;
         return {
             date: friday,
             label: `الجمعة ${index + 1}`,
             service: serviceCount,
-            liturgy: liturgyCount
+            liturgy: liturgyCount,
+            tasbeha: tasbehaCount
         };
     });
 
@@ -336,6 +338,7 @@ function StatsView({ childrenData, appSettings }) {
             const childAtt = attendanceData.filter(a => a.childId === c.id);
             const totalService = childAtt.filter(a => a.type === 'service').length;
             const totalLiturgy = childAtt.filter(a => a.type === 'liturgy').length;
+            const totalTasbeha = childAtt.filter(a => a.type === 'tasbeha').length;
 
             return {
                 "م": c.id,
@@ -353,9 +356,11 @@ function StatsView({ childrenData, appSettings }) {
                 "العنوان التفصيلي": c.detailedAddress || 'غير مسجل',
                 "إجمالي حضور الخدمة": totalService,
                 "إجمالي حضور القداس": totalLiturgy,
+                "إجمالي حضور التسبحة": totalTasbeha,
                 "المواظبة المتتالية الحالية": c.streak || 0,
                 "آخر حضور قداس": c.last_liturgy || 'لم يحضر',
                 "آخر حضور خدمة": c.last_service || 'لم يحضر',
+                "آخر حضور تسبحة": c.last_tasbeha || 'لم يحضر',
                 "آخر تاريخ افتقاد": c.last_visited || 'لم يُفتقد',
                 "أب الاعتراف": c.fatherConfessor || 'غير مسجل',
                 "الرتبة الشماسية": c.gender === 'ولد' ? (c.isOrdained ? c.ordinationRank || 'شماس' : 'غير مرسوم') : 'غير مطبق',
@@ -386,7 +391,7 @@ function StatsView({ childrenData, appSettings }) {
             if (window.confirm("تأكيد أخير: الداتا هتتمسح ومش هترجع، كمل؟")) {
                 try {
                     const now = new Date().toISOString();
-                    const updates = childrenData.map(c => db.children.update(c.id, { streak: 0, last_liturgy: null, last_service: null, last_visited: null, isDirty: true, updatedAt: now }));
+                    const updates = childrenData.map(c => db.children.update(c.id, { streak: 0, last_liturgy: null, last_service: null, last_tasbeha: null, last_visited: null, isDirty: true, updatedAt: now }));
                     await Promise.all(updates);
                     triggerAutoSync();
                     alert(`تم تصفير العدادات بنجاح لفصل ${className}! 🚀`);
@@ -482,6 +487,17 @@ function StatsView({ childrenData, appSettings }) {
                                     </div>
                                     <div className="w-12 text-[10px] font-black text-slate-700 text-left flex items-center justify-end gap-1">
                                         {stat.liturgy}
+                                    </div>
+                                </div>
+
+                                {/* بار التسبحة */}
+                                <div className="flex items-center gap-2">
+                                    <div className="w-10 text-[9px] font-bold text-purple-500 text-right">التسبحة:</div>
+                                    <div className="flex-1 bg-slate-100 rounded-full h-2.5 overflow-hidden flex">
+                                        <div className="bg-purple-400 h-full rounded-full transition-all duration-1000" style={{ width: `${calcPercent(stat.tasbeha)}%` }}></div>
+                                    </div>
+                                    <div className="w-12 text-[10px] font-black text-slate-700 text-left flex items-center justify-end gap-1">
+                                        {stat.tasbeha}
                                     </div>
                                 </div>
                             </div>

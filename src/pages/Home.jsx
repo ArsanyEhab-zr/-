@@ -184,10 +184,11 @@ export default function Home() {
             .slice(0, 15);
 
         const needsVisitation = children.filter(c => {
-            if (!c.last_service && !c.last_liturgy) return true;
+            if (!c.last_service && !c.last_liturgy && !c.last_tasbeha) return true;
             const lastAttended = new Date(Math.max(
                 c.last_service ? new Date(c.last_service).getTime() : 0,
-                c.last_liturgy ? new Date(c.last_liturgy).getTime() : 0
+                c.last_liturgy ? new Date(c.last_liturgy).getTime() : 0,
+                c.last_tasbeha ? new Date(c.last_tasbeha).getTime() : 0
             ));
             const diffDays = Math.floor((now - lastAttended) / (1000 * 60 * 60 * 24));
             return diffDays >= 21 || c.streak === 0;
@@ -242,11 +243,13 @@ export default function Home() {
     const getReportData = () => {
         let list = [];
         if (modalState.type === 'absent') {
-            list = (children || []).filter(c => c.last_service !== targetDate && c.last_liturgy !== targetDate);
+            list = (children || []).filter(c => c.last_service !== targetDate && c.last_liturgy !== targetDate && c.last_tasbeha !== targetDate);
         } else if (modalState.type === 'service') {
             list = (children || []).filter(c => c.last_service === targetDate);
         } else if (modalState.type === 'liturgy') {
             list = (children || []).filter(c => c.last_liturgy === targetDate);
+        } else if (modalState.type === 'tasbeha') {
+            list = (children || []).filter(c => c.last_tasbeha === targetDate);
         }
 
         return {
@@ -512,6 +515,9 @@ export default function Home() {
                                     <button onClick={() => setModalState({ isOpen: true, type: 'liturgy' })} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-xl text-[11px] font-black shadow-md transition-all flex items-center justify-center gap-1.5">
                                         <Church size={14} /> حضر القداس
                                     </button>
+                                    <button onClick={() => setModalState({ isOpen: true, type: 'tasbeha' })} className="flex-1 bg-purple-600 hover:bg-purple-700 text-white py-2 rounded-xl text-[11px] font-black shadow-md transition-all flex items-center justify-center gap-1.5">
+                                        🎵 التسبحة
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -717,10 +723,11 @@ export default function Home() {
                     <div className="bg-white w-full max-w-md rounded-[2.5rem] p-6 shadow-2xl animate-in slide-in-from-bottom-8">
                         <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
                             <h2 className={`text-lg font-black flex items-center gap-2 
-                                ${modalState.type === 'absent' ? 'text-red-600' : modalState.type === 'champions' ? 'text-amber-500' : modalState.type === 'service' ? 'text-green-600' : 'text-blue-600'}`}>
+                                ${modalState.type === 'absent' ? 'text-red-600' : modalState.type === 'champions' ? 'text-amber-500' : modalState.type === 'service' ? 'text-green-600' : modalState.type === 'tasbeha' ? 'text-purple-600' : 'text-blue-600'}`}>
                                 {modalState.type === 'absent' && <><UserMinus size={20} /> مين غاب؟</>}
                                 {modalState.type === 'service' && <><BookOpen size={20} /> حضروا الخدمة</>}
                                 {modalState.type === 'liturgy' && <><Church size={20} /> حضروا القداس</>}
+                                {modalState.type === 'tasbeha' && <>🎵 حضروا التسبحة</>}
                                 {modalState.type === 'champions' && <><Award size={20} className="text-amber-500 animate-bounce" /> مخدومين المواظبة</>}
                             </h2>
                             <button onClick={() => setModalState({ isOpen: false, type: null })} className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:bg-slate-200 transition-colors"><X size={16} /></button>

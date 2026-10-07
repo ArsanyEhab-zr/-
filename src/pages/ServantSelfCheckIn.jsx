@@ -33,6 +33,7 @@ export default function ServantSelfCheckIn() {
         month: monthYear,
         attendance: "حضور",
         liturgy: false,
+        tasbeha: false,
         preparation: false,
         meeting: false,
         visitation: false,
@@ -59,6 +60,7 @@ export default function ServantSelfCheckIn() {
             const updated = { ...prev, [field]: value };
             if (field === 'attendance' && value !== 'حضور') {
                 updated.liturgy = false;
+                updated.tasbeha = false;
                 updated.preparation = false;
                 updated.meeting = false;
                 updated.visitation = false;
@@ -203,6 +205,7 @@ export default function ServantSelfCheckIn() {
                 {/* Sub Activities */}
                 <div className="space-y-4 mb-8">
                     <ToggleCard label="حضرت القداس" icon={Church} field="liturgy" activeColor="bg-blue-500" activeBg="bg-blue-500/10" activeBorder="border-blue-500/50" />
+                    <ToggleCard label="حضرت التسبحة" icon={Church} field="tasbeha" activeColor="bg-purple-500" activeBg="bg-purple-500/10" activeBorder="border-purple-500/50" />
                     <ToggleCard label="حضرت اجتماع الخدمة" icon={BellRing} field="meeting" activeColor="bg-amber-500" activeBg="bg-amber-500/10" activeBorder="border-amber-500/50" />
                     <ToggleCard label="حضرت التحضير" icon={BookOpen} field="preparation" activeColor="bg-purple-500" activeBg="bg-purple-500/10" activeBorder="border-purple-500/50" />
                     <ToggleCard label="شاركت بالافتقاد" icon={MapPin} field="visitation" activeColor="bg-rose-500" activeBg="bg-rose-500/10" activeBorder="border-rose-500/50" />

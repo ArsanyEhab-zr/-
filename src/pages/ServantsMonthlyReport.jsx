@@ -129,6 +129,7 @@ export default function ServantsMonthlyReport() {
 
                     const generalAttendanceCount = records.filter(r => r.attendance === 'حضور').length;
                     const liturgyCount = records.filter(r => r.liturgy).length;
+                    const tasbehaCount = records.filter(r => r.tasbeha).length;
                     const prepCount = records.filter(r => r.preparation).length;
                     const meetingCount = records.filter(r => r.meeting).length;
                     
@@ -159,12 +160,14 @@ export default function ServantsMonthlyReport() {
                         attendance: attendanceArr,
                         generalAttendanceCount,
                         liturgyCount,
+                        tasbehaCount,
                         prepCount,
                         meetingCount,
                         visitationCount,
                         serviceActivityCount,
                         dioceseActivityCount,
                         liturgy: `${liturgyCount}/${totalWeeks}`,
+                        tasbeha: `${tasbehaCount}/${totalWeeks}`,
                         preparation: `${prepCount}/${totalWeeks}`,
                         meeting: `${meetingCount}/${totalWeeks}`,
                         visitation: viewMode === 'monthly' ? (records.some(r => r.visitation) ? '✅' : '❌') : visitationCount,
@@ -371,6 +374,7 @@ export default function ServantsMonthlyReport() {
                                         <th className="p-3 border border-slate-200 min-w-[120px]" rowSpan="2">الأسرة</th>
                                         <th className="p-3 border border-slate-200 bg-emerald-50 text-emerald-800" colSpan="5">حضور الخدمة</th>
                                         <th className="p-3 border border-slate-200 min-w-[80px]" rowSpan="2">قداس</th>
+                                        <th className="p-3 border border-slate-200 min-w-[80px]" rowSpan="2">تسبحة</th>
                                         <th className="p-3 border border-slate-200 min-w-[80px]" rowSpan="2">التحضير</th>
                                         <th className="p-3 border border-slate-200 min-w-[100px]" rowSpan="2">اجتماع الخدمة</th>
                                         <th className="p-3 border border-slate-200 min-w-[100px]" rowSpan="2">مشارك بالافتقاد</th>
@@ -397,6 +401,7 @@ export default function ServantsMonthlyReport() {
                                     <th className="p-3 border border-slate-200 min-w-[120px]">الأسرة</th>
                                     <th className="p-3 border border-slate-200 bg-emerald-50 text-emerald-800">إجمالي الحضور العامة</th>
                                     <th className="p-3 border border-slate-200 bg-emerald-50 text-emerald-800">إجمالي القداسات</th>
+                                    <th className="p-3 border border-slate-200 bg-emerald-50 text-emerald-800">إجمالي التسبحة</th>
                                     <th className="p-3 border border-slate-200 bg-emerald-50 text-emerald-800">إجمالي التحضير</th>
                                     <th className="p-3 border border-slate-200 bg-emerald-50 text-emerald-800">إجمالي اجتماع الخدمة</th>
                                     <th className="p-3 border border-slate-200 text-blue-800">مشاركات الافتقاد</th>
@@ -434,6 +439,7 @@ export default function ServantsMonthlyReport() {
                                                 ))}
 
                                                 <td className="p-3 border border-slate-200 font-bold text-slate-700">{s.liturgy}</td>
+                                                <td className="p-3 border border-slate-200 font-bold text-slate-700">{s.tasbeha}</td>
                                                 <td className="p-3 border border-slate-200 font-bold text-slate-700">{s.preparation}</td>
                                                 <td className="p-3 border border-slate-200 font-bold text-slate-700">{s.meeting}</td>
                                                 <td className="p-3 border border-slate-200 font-bold text-slate-700">{s.visitation}</td>
@@ -465,6 +471,7 @@ export default function ServantsMonthlyReport() {
                                                 {/* Yearly Data Aggregation Columns */}
                                                 <td className="p-3 border border-slate-200 font-black text-slate-800 bg-slate-50/50">{s.generalAttendanceCount} / {s.totalWeeks}</td>
                                                 <td className="p-3 border border-slate-200 font-black text-emerald-700 bg-emerald-50/30">{s.liturgyCount}</td>
+                                                <td className="p-3 border border-slate-200 font-black text-emerald-700 bg-emerald-50/30">{s.tasbehaCount}</td>
                                                 <td className="p-3 border border-slate-200 font-black text-emerald-700 bg-emerald-50/30">{s.prepCount}</td>
                                                 <td className="p-3 border border-slate-200 font-black text-emerald-700 bg-emerald-50/30">{s.meetingCount}</td>
                                                 

@@ -155,6 +155,7 @@ export default function ParentDashboard() {
     // Calculations
     const totalServices = attendance ? attendance.filter(a => a.type === 'service').length : 0;
     const totalLiturgies = attendance ? attendance.filter(a => a.type === 'liturgy').length : 0;
+    const totalTasbeha = attendance ? attendance.filter(a => a.type === 'tasbeha').length : 0;
 
     const displayName = childInfo?.name || childName || 'المخدوم';
     const displayClass = childInfo?.className || childInfo?.osraName || className || TENANT_CONFIG.APP_NAME;
@@ -240,7 +241,7 @@ export default function ParentDashboard() {
                     <h2 className="text-lg font-black text-slate-800 mb-4 flex items-center gap-2">
                         <CheckCheck className="text-emerald-500" /> ملخص الحضور
                     </h2>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-3 gap-4">
                         <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-100 flex flex-col items-center">
                             <span className="text-xs font-bold text-emerald-600 mb-1">الخدمة</span>
                             <span className="text-3xl font-black text-emerald-700">{totalServices}</span>
@@ -248,6 +249,10 @@ export default function ParentDashboard() {
                         <div className="bg-blue-50 p-4 rounded-2xl border border-blue-100 flex flex-col items-center">
                             <span className="text-xs font-bold text-blue-600 mb-1">القداس</span>
                             <span className="text-3xl font-black text-blue-700">{totalLiturgies}</span>
+                        </div>
+                        <div className="bg-purple-50 p-4 rounded-2xl border border-purple-100 flex flex-col items-center">
+                            <span className="text-xs font-bold text-purple-600 mb-1">التسبحة</span>
+                            <span className="text-3xl font-black text-purple-700">{totalTasbeha}</span>
                         </div>
                     </div>
                 </section>

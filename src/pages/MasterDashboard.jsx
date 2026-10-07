@@ -893,7 +893,7 @@ export default function MasterDashboard() {
                                                 try {
                                                     const now = new Date().toISOString();
                                                     const allKids = await db.children.toArray();
-                                                    const updates = allKids.map(c => db.children.update(c.id, { streak: 0, last_liturgy: null, last_service: null, last_visited: null, isDirty: true, updatedAt: now }));
+                                                    const updates = allKids.map(c => db.children.update(c.id, { streak: 0, last_liturgy: null, last_service: null, last_tasbeha: null, last_visited: null, isDirty: true, updatedAt: now }));
                                                     await Promise.all(updates);
                                                     triggerAutoSync();
                                                     alert("تم تصفير العدادات بنجاح لجميع الفصول! 🚀");

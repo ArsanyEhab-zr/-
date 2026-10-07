@@ -56,6 +56,7 @@ export default function ExcelExporter() {
                     "المنطقة": child.address || "",
                     "العنوان بالتفصيل": child.detailedAddress || "",
                     "المواظبة (مرات الحضور)": child.streak || 0,
+                    "آخر حضور تسبحة": child.last_tasbeha || "لم يحضر",
                     "وظيفة الأب": child.fatherJob || "",
                     "ملاحظات هامة": child.specialNotes || "",
                     "أب الاعتراف": child.fatherConfessor || "",
@@ -83,6 +84,7 @@ export default function ExcelExporter() {
                 { wch: 20 }, // المنطقة
                 { wch: 40 }, // العنوان بالتفصيل
                 { wch: 25 }, // المواظبة (مرات الحضور)
+                { wch: 25 }, // آخر حضور تسبحة
                 { wch: 20 }, // وظيفة الأب
                 { wch: 40 }, // ملاحظات هامة
                 { wch: 25 }, // أب الاعتراف
