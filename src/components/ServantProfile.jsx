@@ -30,9 +30,12 @@ const DEFAULT_BADGE = { bg: 'bg-slate-100', text: 'text-slate-600', border: 'bor
  */
 export default function ServantProfile({ servantData = null, isOpen = false, onClose, readOnly = false }) {
     // ─── Determine view mode ───
-    const currentServant = JSON.parse(localStorage.getItem('currentServant') || '{}');
+    // Use React state for currentServant so updates trigger re-renders
+    const [localServant, setLocalServant] = useState(() => {
+        try { return JSON.parse(localStorage.getItem('currentServant') || '{}'); } catch { return {}; }
+    });
     const isSelfView = !servantData;
-    const servant = servantData || currentServant;
+    const servant = servantData || localServant;
     const canEdit = isSelfView && !readOnly;
 
     // ─── State ───
@@ -55,7 +58,7 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
             const found = allOsras.find(o => o.syncKey === servant.syncKey);
             return found?.name || servant.syncKey || 'غير محدد';
         } catch { return servant.syncKey || 'غير محدد'; }
-    }, [servant]);
+    }, [servant.assignedOsra, servant.syncKey]);
 
     // ─── Stable key for servant identity (prevents infinite re-renders) ───
     const servantUID = servant.uid || servant.phone || '';
@@ -98,7 +101,17 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
         return () => { cancelled = true; };
     }, [isOpen, servantUID]);
 
-    // ─── Reset state when modal opens/closes or servant changes ───
+    // ─── Re-read localStorage when modal opens (in case data changed externally) ───
+    useEffect(() => {
+        if (isOpen && isSelfView) {
+            try {
+                const fresh = JSON.parse(localStorage.getItem('currentServant') || '{}');
+                setLocalServant(fresh);
+            } catch { /* ignore */ }
+        }
+    }, [isOpen, isSelfView]);
+
+    // ─── Reset form fields when modal opens or servant identity changes ───
     useEffect(() => {
         if (isOpen) {
             setAddress(servant.address || '');
@@ -106,7 +119,9 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
             setSaveSuccess(false);
             setEditingAddress(false);
         }
-    }, [isOpen, servant]);
+    // Only reset when the modal opens or the servant identity changes, NOT on every render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen, servantUID]);
 
     // ─── Image Upload Handler ───
     const handleImageUpload = async (e) => {
@@ -155,12 +170,15 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
         }
     };
 
-    // ─── Centralized update: Firestore + localStorage + Dexie ───
+    // ─── Centralized update: Firestore + localStorage + Dexie + React state ───
     const updateServantData = async (updates) => {
-        const servantUID = currentServant.uid || currentServant.phone;
-        let updatedServantRecord = { ...currentServant, ...updates };
+        // Read the freshest localStorage copy (not stale closure)
+        let freshServant;
+        try { freshServant = JSON.parse(localStorage.getItem('currentServant') || '{}'); } catch { freshServant = localServant; }
+        const uid = freshServant.uid || freshServant.phone;
+        let updatedServantRecord = { ...freshServant, ...updates };
 
-        console.log('[ServantProfile] Attempting update for:', servantUID, 'with updates:', updates);
+        console.log('[ServantProfile] Attempting update for UID:', uid, '| Updates:', JSON.stringify(updates));
 
         // 1. Update mainConfig.servants array in Firestore
         try {
@@ -169,66 +187,82 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
             if (configSnap.exists()) {
                 const config = configSnap.data();
                 const servantsList = config.servants || [];
-                
-                // Robust matching: check if either uid or phone matches
-                const idx = servantsList.findIndex(s => 
-                    (s.uid && s.uid === servantUID) || 
-                    (s.phone && s.phone === servantUID)
+
+                console.log('[ServantProfile] Firestore servants count:', servantsList.length);
+
+                // Robust matching: try phone first (most reliable), then uid
+                const servantPhone = freshServant.phone;
+                const servantUid = freshServant.uid;
+                const idx = servantsList.findIndex(s =>
+                    (servantPhone && s.phone === servantPhone) ||
+                    (servantUid && s.uid === servantUid)
                 );
 
                 if (idx > -1) {
-                    console.log('[ServantProfile] Found servant at index:', idx, 'Current data:', servantsList[idx]);
+                    console.log('[ServantProfile] ✅ Found servant at index:', idx, '| Name:', servantsList[idx].name);
                     servantsList[idx] = { ...servantsList[idx], ...updates };
-                    updatedServantRecord = servantsList[idx]; // Keep the most complete record
-                    
+                    updatedServantRecord = servantsList[idx];
+
                     await updateDoc(configRef, { servants: servantsList });
-                    console.log('[ServantProfile] Successfully updated Firestore mainConfig');
+                    console.log('[ServantProfile] ✅ Firestore mainConfig updated successfully');
                 } else {
-                    console.error('[ServantProfile] Failed to find servant in mainConfig array! Searched for:', servantUID);
+                    console.error('[ServantProfile] ❌ Servant NOT found in mainConfig! phone:', servantPhone, 'uid:', servantUid);
+                    console.error('[ServantProfile] Available phones:', servantsList.map(s => s.phone));
                 }
             } else {
-                console.error('[ServantProfile] mainConfig document does not exist in Firestore!');
+                console.error('[ServantProfile] ❌ mainConfig document does not exist!');
             }
         } catch (err) {
-            console.error('[ServantProfile] Firestore update error:', err);
+            console.error('[ServantProfile] ❌ Firestore update error:', err);
         }
 
         // 2. Update localStorage (currentServant + appSettings)
         localStorage.setItem('currentServant', JSON.stringify(updatedServantRecord));
+        console.log('[ServantProfile] ✅ localStorage currentServant updated');
 
         try {
             const localSettings = JSON.parse(localStorage.getItem('appSettings') || '{}');
             const servantsList = localSettings.servants || [];
-            const idx = servantsList.findIndex(s => 
-                (s.uid && s.uid === servantUID) || 
-                (s.phone && s.phone === servantUID)
+            const servantPhone = freshServant.phone;
+            const servantUid = freshServant.uid;
+            const idx = servantsList.findIndex(s =>
+                (servantPhone && s.phone === servantPhone) ||
+                (servantUid && s.uid === servantUid)
             );
-            
+
             if (idx > -1) {
                 servantsList[idx] = { ...servantsList[idx], ...updates };
                 localSettings.servants = servantsList;
                 localStorage.setItem('appSettings', JSON.stringify(localSettings));
-                console.log('[ServantProfile] Successfully updated localStorage appSettings');
+                console.log('[ServantProfile] ✅ localStorage appSettings updated');
             }
         } catch (err) {
-            console.error('[ServantProfile] localStorage update error:', err);
+            console.error('[ServantProfile] ❌ localStorage update error:', err);
         }
 
         // 3. Update local Dexie DB for instant UI sync
         try {
-            const existing = await db.servants.where('phone').equals(updatedServantRecord.phone).first();
-            if (existing) {
-                await db.servants.put({ ...existing, ...updates });
-                console.log('[ServantProfile] Successfully updated Dexie DB (existing record)');
-            } else if (updatedServantRecord.id) {
-                await db.servants.put(updatedServantRecord);
-                console.log('[ServantProfile] Successfully updated Dexie DB (new record with ID)');
-            } else {
-                console.warn('[ServantProfile] Could not update Dexie DB: no existing record found and no ID provided.');
+            if (updatedServantRecord.phone) {
+                const existing = await db.servants.where('phone').equals(updatedServantRecord.phone).first();
+                if (existing) {
+                    await db.servants.put({ ...existing, ...updates });
+                    console.log('[ServantProfile] ✅ Dexie DB updated (existing record)');
+                } else if (updatedServantRecord.id) {
+                    await db.servants.put(updatedServantRecord);
+                    console.log('[ServantProfile] ✅ Dexie DB updated (new record)');
+                }
             }
         } catch (err) {
-            console.error('[ServantProfile] Dexie DB update error:', err);
+            console.error('[ServantProfile] ❌ Dexie DB update error:', err);
         }
+
+        // 4. Update React state so the UI re-renders instantly
+        if (isSelfView) {
+            setLocalServant(updatedServantRecord);
+        }
+        // Also update the local display states
+        if (updates.photoURL) setPhotoURL(updates.photoURL);
+        if (updates.address !== undefined) setAddress(updates.address);
     };
 
     // ─── Don't render if closed ───
