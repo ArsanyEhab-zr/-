@@ -160,6 +160,8 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
         const servantUID = currentServant.uid || currentServant.phone;
         let updatedServantRecord = { ...currentServant, ...updates };
 
+        console.log('[ServantProfile] Attempting update for:', servantUID, 'with updates:', updates);
+
         // 1. Update mainConfig.servants array in Firestore
         try {
             const configRef = doc(firestore, 'System', 'mainConfig');
@@ -167,15 +169,28 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
             if (configSnap.exists()) {
                 const config = configSnap.data();
                 const servantsList = config.servants || [];
-                const idx = servantsList.findIndex(s => (s.phone === servantUID || s.uid === servantUID));
+                
+                // Robust matching: check if either uid or phone matches
+                const idx = servantsList.findIndex(s => 
+                    (s.uid && s.uid === servantUID) || 
+                    (s.phone && s.phone === servantUID)
+                );
+
                 if (idx > -1) {
+                    console.log('[ServantProfile] Found servant at index:', idx, 'Current data:', servantsList[idx]);
                     servantsList[idx] = { ...servantsList[idx], ...updates };
                     updatedServantRecord = servantsList[idx]; // Keep the most complete record
+                    
                     await updateDoc(configRef, { servants: servantsList });
+                    console.log('[ServantProfile] Successfully updated Firestore mainConfig');
+                } else {
+                    console.error('[ServantProfile] Failed to find servant in mainConfig array! Searched for:', servantUID);
                 }
+            } else {
+                console.error('[ServantProfile] mainConfig document does not exist in Firestore!');
             }
         } catch (err) {
-            console.warn('[ServantProfile] Firestore update warning:', err.message);
+            console.error('[ServantProfile] Firestore update error:', err);
         }
 
         // 2. Update localStorage (currentServant + appSettings)
@@ -184,14 +199,19 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
         try {
             const localSettings = JSON.parse(localStorage.getItem('appSettings') || '{}');
             const servantsList = localSettings.servants || [];
-            const idx = servantsList.findIndex(s => (s.phone === servantUID || s.uid === servantUID));
+            const idx = servantsList.findIndex(s => 
+                (s.uid && s.uid === servantUID) || 
+                (s.phone && s.phone === servantUID)
+            );
+            
             if (idx > -1) {
                 servantsList[idx] = { ...servantsList[idx], ...updates };
                 localSettings.servants = servantsList;
                 localStorage.setItem('appSettings', JSON.stringify(localSettings));
+                console.log('[ServantProfile] Successfully updated localStorage appSettings');
             }
         } catch (err) {
-            console.warn('[ServantProfile] localStorage update warning:', err.message);
+            console.error('[ServantProfile] localStorage update error:', err);
         }
 
         // 3. Update local Dexie DB for instant UI sync
@@ -199,11 +219,15 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
             const existing = await db.servants.where('phone').equals(updatedServantRecord.phone).first();
             if (existing) {
                 await db.servants.put({ ...existing, ...updates });
+                console.log('[ServantProfile] Successfully updated Dexie DB (existing record)');
             } else if (updatedServantRecord.id) {
                 await db.servants.put(updatedServantRecord);
+                console.log('[ServantProfile] Successfully updated Dexie DB (new record with ID)');
+            } else {
+                console.warn('[ServantProfile] Could not update Dexie DB: no existing record found and no ID provided.');
             }
         } catch (err) {
-            console.warn('[ServantProfile] Dexie DB update warning:', err.message);
+            console.error('[ServantProfile] Dexie DB update error:', err);
         }
     };
 
