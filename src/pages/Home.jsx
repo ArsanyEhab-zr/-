@@ -5,7 +5,8 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
 import SmartAlerts from '../components/SmartAlerts';
-import { Settings, Users, MapPin, Gift, BookOpen, CalendarDays, Church, UserMinus, UserCheck, X, MessageCircleWarning, FileText, Crown, ArrowRight, Bell, Star, PhoneCall, Award, ChevronRight, QrCode, CreditCard, Target, CheckCircle } from 'lucide-react';
+import ServantProfile from '../components/ServantProfile';
+import { Settings, Users, MapPin, Gift, BookOpen, CalendarDays, Church, UserMinus, UserCheck, X, MessageCircleWarning, FileText, Crown, ArrowRight, Bell, Star, PhoneCall, Award, ChevronRight, QrCode, CreditCard, Target, CheckCircle, UserCircle } from 'lucide-react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { firestore } from '../db/firebase';
 import { LocalNotifications } from '@capacitor/local-notifications';
@@ -21,6 +22,9 @@ export default function Home() {
     const [showPastDatePicker, setShowPastDatePicker] = useState(false);
     const [pastDate, setPastDate] = useState('');
     const [activities, setActivities] = useState({ targeted: [], executed: [] });
+
+    // 👤 My Profile Modal State
+    const [isMyProfileOpen, setIsMyProfileOpen] = useState(false);
 
     useEffect(() => {
         const activitiesRef = doc(firestore, 'System', 'serviceActivities');
@@ -422,6 +426,13 @@ export default function Home() {
                         </div>
 
                         <div className="flex flex-col gap-3">
+                            <button
+                                onClick={() => setIsMyProfileOpen(true)}
+                                aria-label="الملف الشخصي"
+                                className="w-12 h-12 rounded-full bg-indigo-50 text-indigo-600 flex justify-center items-center hover:bg-indigo-600 hover:text-white transition-all shadow-sm"
+                            >
+                                <UserCircle size={24} />
+                            </button>
                             <Link to="/dashboard" aria-label="لوحة التحكم والإعدادات" className="w-12 h-12 rounded-full bg-slate-100 text-slate-600 flex justify-center items-center hover:bg-indigo-600 hover:text-white transition-all shadow-sm">
                                 <Settings size={24} />
                             </Link>
@@ -811,6 +822,14 @@ export default function Home() {
                     </div>
                 </div>
             )}
+
+            {/* 👤 My Profile Modal (Self View - Editable) */}
+            <ServantProfile
+                servantData={null}
+                isOpen={isMyProfileOpen}
+                onClose={() => setIsMyProfileOpen(false)}
+                readOnly={false}
+            />
         </div>
     );
 }

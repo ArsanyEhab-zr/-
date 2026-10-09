@@ -9,6 +9,7 @@ import { encryptData, decryptData } from '../encryption';
 import { firestore } from '../db/firebase';
 import { ArrowRight, ShieldAlert, Users, Search, Phone, Crown, Layers, MessageCircle, UserCircle, Key, AlertTriangle, CheckCircle, RefreshCw, Trash2, Target, CheckSquare, Plus, Edit3, ArrowLeftRight, ChevronDown } from 'lucide-react';
 import ExcelExporter from '../components/ExcelExporter';
+import ServantProfile from '../components/ServantProfile';
 import useAutoSync from '../hooks/useAutoSync';
 import { TENANT_CONFIG } from '../config/tenantConfig';
 
@@ -58,6 +59,10 @@ export default function MasterDashboard() {
     const [activities, setActivities] = useState({ targeted: [], executed: [] });
     const [newActivity, setNewActivity] = useState('');
     const [newActivityType, setNewActivityType] = useState('targeted');
+
+    // 👤 بروفايل الخادم (Modal State)
+    const [selectedServantForProfile, setSelectedServantForProfile] = useState(null);
+    const [isServantProfileOpen, setIsServantProfileOpen] = useState(false);
 
     useEffect(() => {
         if (!hasAccess) return;
@@ -681,29 +686,41 @@ export default function MasterDashboard() {
                                     </div>
                                 ) : (
                                     osraServants.map(servant => (
-                                        <div key={servant.id} className="bg-white p-4 rounded-2xl shadow-sm border border-amber-100 flex flex-col md:flex-row md:items-center justify-between gap-4 relative overflow-hidden group">
+                                        <div key={servant.id} className="bg-white p-4 rounded-2xl shadow-sm border border-amber-100 flex flex-col md:flex-row md:items-center justify-between gap-4 relative overflow-hidden group cursor-pointer hover:shadow-md hover:border-amber-200 hover:scale-[1.01] transition-all" onClick={() => { setSelectedServantForProfile(servant); setIsServantProfileOpen(true); }}>
                                             <div className="absolute top-0 right-0 w-1.5 h-full bg-amber-400"></div>
 
-                                            <div className="pr-2">
-                                                <h3 className="font-black text-slate-800 flex items-center gap-2">
-                                                    {servant.name}
-                                                    <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-50 text-amber-600">
-                                                        {servant.role}
-                                                    </span>
-                                                </h3>
-                                                <p className="text-[11px] font-bold text-slate-500 mt-1 flex items-center gap-2">
-                                                    <span className="flex items-center gap-1"><Users size={12} /> {servant.assignedOsra}</span>
-                                                    <span className="flex items-center gap-1 text-indigo-500"><Key size={12} /> {servant.syncKey}</span>
-                                                </p>
+                                            <div className="flex items-center gap-3 pr-2">
+                                                {servant.photoURL || servant.profileImage ? (
+                                                    <img src={servant.photoURL || servant.profileImage} alt={servant.name} className="w-11 h-11 rounded-full object-cover border-2 border-amber-200 shadow-sm shrink-0" />
+                                                ) : (
+                                                    <div className="w-11 h-11 rounded-full bg-amber-50 flex items-center justify-center text-amber-600 font-black text-sm border-2 border-amber-200 shrink-0">
+                                                        {(servant.name || 'خ').substring(0, 2)}
+                                                    </div>
+                                                )}
+                                                <div>
+                                                    <h3 className="font-black text-slate-800 flex items-center gap-2">
+                                                        {servant.name}
+                                                        <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-50 text-amber-600">
+                                                            {servant.role}
+                                                        </span>
+                                                    </h3>
+                                                    <p className="text-[11px] font-bold text-slate-500 mt-1 flex items-center gap-2">
+                                                        <span className="flex items-center gap-1"><Users size={12} /> {servant.assignedOsra}</span>
+                                                        <span className="flex items-center gap-1 text-indigo-500"><Key size={12} /> {servant.syncKey}</span>
+                                                    </p>
+                                                </div>
                                             </div>
 
-                                            <div className="flex items-center gap-2">
+                                            <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                                                 <a href={`tel:${servant.phone}`} className="bg-slate-50 text-slate-600 p-2.5 rounded-xl hover:bg-slate-200 transition-colors flex items-center justify-center shadow-sm">
                                                     <Phone size={16} />
                                                 </a>
                                                 <a href={`https://wa.me/${cleanPhoneForWhatsapp(servant.phone)}`} target="_blank" rel="noreferrer" className="bg-green-50 text-green-600 p-2.5 rounded-xl hover:bg-green-100 transition-colors flex items-center justify-center shadow-sm">
                                                     <MessageCircle size={16} />
                                                 </a>
+                                                <button className="bg-indigo-50 text-indigo-600 p-2.5 rounded-xl hover:bg-indigo-100 transition-colors flex items-center justify-center shadow-sm" title="عرض البروفايل">
+                                                    <UserCircle size={16} />
+                                                </button>
                                             </div>
                                         </div>
                                     ))
@@ -947,6 +964,14 @@ export default function MasterDashboard() {
                     </div>
                 )}
             </main>
+
+            {/* 👤 ServantProfile Modal (Admin View - Read Only) */}
+            <ServantProfile
+                servantData={selectedServantForProfile}
+                isOpen={isServantProfileOpen}
+                onClose={() => { setIsServantProfileOpen(false); setSelectedServantForProfile(null); }}
+                readOnly={true}
+            />
         </div>
     );
 }
