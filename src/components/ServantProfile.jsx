@@ -2,8 +2,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Camera, MapPin, Save, UserCircle, Users, Shield, CheckCircle, CalendarCheck, Loader2, ImagePlus, Sparkles } from 'lucide-react';
 import { doc, getDoc, setDoc, collection, query, where, getDocs } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { firestore, storage } from '../db/firebase';
+import { firestore } from '../db/firebase';
+import { uploadImageToCloudinary } from '../utils/cloudinary';
 
 // 🎨 Role badge config — color-coded for visual hierarchy
 const ROLE_BADGES = {
@@ -56,19 +56,27 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
         } catch { return servant.syncKey || 'غير محدد'; }
     }, [servant]);
 
+    // ─── Stable key for servant identity (prevents infinite re-renders) ───
+    const servantUID = servant.uid || servant.phone || '';
+
     // ─── Fetch all-time attendance count from Firestore ───
     useEffect(() => {
-        if (!isOpen) return;
+        if (!isOpen || !servantUID) {
+            setAttendanceCount(0);
+            setIsLoadingAttendance(false);
+            return;
+        }
+
+        let cancelled = false;
         const fetchAttendance = async () => {
             setIsLoadingAttendance(true);
             try {
-                const servantUID = servant.uid || servant.phone;
-                if (!servantUID) { setAttendanceCount(0); setIsLoadingAttendance(false); return; }
-
-                // Query ServantAttendance where uid matches and attendance === 'حضور'
+                // Query ServantAttendance where uid matches
                 const attendanceRef = collection(firestore, 'ServantAttendance');
                 const q = query(attendanceRef, where('uid', '==', servantUID));
                 const snapshot = await getDocs(q);
+
+                if (cancelled) return;
 
                 let count = 0;
                 snapshot.forEach(docSnap => {
@@ -78,14 +86,16 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
 
                 setAttendanceCount(count);
             } catch (error) {
-                console.warn('[ServantProfile] Attendance fetch error:', error.message);
-                setAttendanceCount(0);
+                console.warn('[ServantProfile] Attendance fetch error:', error?.message || error);
+                if (!cancelled) setAttendanceCount(0);
             } finally {
-                setIsLoadingAttendance(false);
+                if (!cancelled) setIsLoadingAttendance(false);
             }
         };
         fetchAttendance();
-    }, [isOpen, servant]);
+
+        return () => { cancelled = true; };
+    }, [isOpen, servantUID]);
 
     // ─── Reset state when modal opens/closes or servant changes ───
     useEffect(() => {
@@ -114,10 +124,8 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
 
         setIsUploading(true);
         try {
-            const servantUID = currentServant.uid || currentServant.phone;
-            const storageRef = ref(storage, `servant-photos/${servantUID}_${Date.now()}`);
-            await uploadBytes(storageRef, file);
-            const downloadURL = await getDownloadURL(storageRef);
+            // Upload via Cloudinary (unsigned preset — same pattern as rest of the app)
+            const downloadURL = await uploadImageToCloudinary(file, 'image');
             setPhotoURL(downloadURL);
 
             // Update Firestore & localStorage immediately
