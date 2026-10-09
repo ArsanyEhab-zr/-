@@ -1,8 +1,9 @@
 /* eslint-disable no-unused-vars */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Camera, MapPin, Save, UserCircle, Users, Shield, CheckCircle, CalendarCheck, Loader2, ImagePlus, Sparkles } from 'lucide-react';
-import { doc, getDoc, setDoc, collection, query, where, getDocs } from 'firebase/firestore';
+import { doc, getDoc, updateDoc, setDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { firestore } from '../db/firebase';
+import { db } from '../db/database';
 import { uploadImageToCloudinary } from '../utils/cloudinary';
 
 // 🎨 Role badge config — color-coded for visual hierarchy
@@ -154,9 +155,10 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
         }
     };
 
-    // ─── Centralized update: Firestore + localStorage ───
+    // ─── Centralized update: Firestore + localStorage + Dexie ───
     const updateServantData = async (updates) => {
         const servantUID = currentServant.uid || currentServant.phone;
+        let updatedServantRecord = { ...currentServant, ...updates };
 
         // 1. Update mainConfig.servants array in Firestore
         try {
@@ -165,10 +167,11 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
             if (configSnap.exists()) {
                 const config = configSnap.data();
                 const servantsList = config.servants || [];
-                const idx = servantsList.findIndex(s => (s.uid || s.phone) === servantUID);
+                const idx = servantsList.findIndex(s => (s.phone === servantUID || s.uid === servantUID));
                 if (idx > -1) {
                     servantsList[idx] = { ...servantsList[idx], ...updates };
-                    await setDoc(configRef, { ...config, servants: servantsList }, { merge: true });
+                    updatedServantRecord = servantsList[idx]; // Keep the most complete record
+                    await updateDoc(configRef, { servants: servantsList });
                 }
             }
         } catch (err) {
@@ -176,13 +179,12 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
         }
 
         // 2. Update localStorage (currentServant + appSettings)
-        const updatedServant = { ...currentServant, ...updates };
-        localStorage.setItem('currentServant', JSON.stringify(updatedServant));
+        localStorage.setItem('currentServant', JSON.stringify(updatedServantRecord));
 
         try {
             const localSettings = JSON.parse(localStorage.getItem('appSettings') || '{}');
             const servantsList = localSettings.servants || [];
-            const idx = servantsList.findIndex(s => (s.uid || s.phone) === servantUID);
+            const idx = servantsList.findIndex(s => (s.phone === servantUID || s.uid === servantUID));
             if (idx > -1) {
                 servantsList[idx] = { ...servantsList[idx], ...updates };
                 localSettings.servants = servantsList;
@@ -190,6 +192,18 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
             }
         } catch (err) {
             console.warn('[ServantProfile] localStorage update warning:', err.message);
+        }
+
+        // 3. Update local Dexie DB for instant UI sync
+        try {
+            const existing = await db.servants.where('phone').equals(updatedServantRecord.phone).first();
+            if (existing) {
+                await db.servants.put({ ...existing, ...updates });
+            } else if (updatedServantRecord.id) {
+                await db.servants.put(updatedServantRecord);
+            }
+        } catch (err) {
+            console.warn('[ServantProfile] Dexie DB update warning:', err.message);
         }
     };
 
