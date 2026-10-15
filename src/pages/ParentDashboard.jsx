@@ -51,7 +51,7 @@ export default function ParentDashboard() {
                     const decrypted = data.payload ? decryptData(data.payload) : data;
                     if (decrypted) {
                         const recordChildIdStr = decrypted.childId ? String(decrypted.childId).trim() : '';
-                        if (recordChildIdStr === targetIdStr || (parseInt(recordChildIdStr, 10) === parseInt(targetIdStr, 10) && !isNaN(parseInt(targetIdStr, 10)))) {
+                        if (recordChildIdStr === targetIdStr || (/^\d+$/.test(targetIdStr) && /^\d+$/.test(recordChildIdStr) && parseInt(recordChildIdStr, 10) === parseInt(targetIdStr, 10))) {
                             list.push({ id: docSnap.id, ...decrypted });
                         }
                     }

@@ -4,6 +4,7 @@ import { db } from '../db/database';
 import { FileSpreadsheet, Loader2, Upload } from 'lucide-react';
 
 import useAutoSync from '../hooks/useAutoSync';
+import { generateChildId, isCleanChildId, ensureCleanChildId } from '../utils/idGenerator';
 
 export default function ExcelImporter() {
     const [isImporting, setIsImporting] = useState(false);
@@ -58,12 +59,6 @@ export default function ExcelImporter() {
         return { bMonth, bDay };
     };
 
-    const generateUniqueId = () => {
-        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-            return crypto.randomUUID();
-        }
-        return 'id_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 9);
-    };
 
     const handleFileUpload = (e) => {
         const file = e.target.files?.[0];
@@ -118,7 +113,7 @@ export default function ExcelImporter() {
                     // استبعاد الصفوف التي تفتقر للاسم الأساسي
                     if (!name) continue;
 
-                    // استخراج الـ ID الأصلي أو الكود أو توليد ID فريد صالح
+                    // استخراج الـ ID الأصلي أو الكود إن كان نظيفاً ومطابقاً للنمط، وإلا تركه لتوليد ID مهيكل نظيف
                     const rawId = trimStr(
                         row["id"] || 
                         row["ID"] || 
@@ -128,9 +123,7 @@ export default function ExcelImporter() {
                         row["كود المخدوم"]
                     );
 
-                    const primaryKey = (rawId && rawId !== "لم يتم إنشاء كود") 
-                        ? rawId 
-                        : (row.id || row.code || `child_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+                    const primaryKey = isCleanChildId(rawId) ? rawId : null;
 
                     const rawBirthDate = trimStr(row["birthDate"] || row["تاريخ الميلاد"]);
                     const { bMonth, bDay } = parseArabicDate(rawBirthDate);
@@ -194,6 +187,8 @@ export default function ExcelImporter() {
                 let successCount = 0;
                 const errorRows = [];
 
+                const existingIds = new Set(existingChildren.map(c => c.id).filter(Boolean));
+
                 for (const { excelRowNum, childData } of sanitizedRows) {
                     try {
                         const existingChild = existingChildren.find(c => 
@@ -202,6 +197,7 @@ export default function ExcelImporter() {
                         );
 
                         if (existingChild) {
+                            const finalId = ensureCleanChildId(existingChild.id, childData.gender, undefined, existingIds);
                             const updated = { 
                                 ...existingChild, 
                                 ...childData, 
@@ -211,15 +207,18 @@ export default function ExcelImporter() {
                                 last_service: existingChild.last_service || null,
                                 last_tasbeha: childData.last_tasbeha || existingChild.last_tasbeha || null,
                                 last_visited: existingChild.last_visited || null,
-                                id: existingChild.id || childData.id, 
+                                id: finalId, 
                                 isDeleted: false 
                             };
+                            if (existingChild.id !== finalId) {
+                                await db.children.delete(existingChild.id);
+                            }
                             await db.children.put(updated);
                             Object.assign(existingChild, updated);
                         } else {
-                            if (!childData.id || typeof childData.id !== 'string' || childData.id.trim() === '') {
-                                childData.id = `child_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-                            }
+                            const finalId = ensureCleanChildId(childData.id, childData.gender, undefined, existingIds);
+                            childData.id = finalId;
+                            existingIds.add(finalId);
                             await db.children.add(childData);
                             existingChildren.push({ ...childData });
                         }

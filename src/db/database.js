@@ -118,3 +118,12 @@ db.version(13).stores({
     grades: '++id, examId, examName, date, childId, grade, maxGrade, syncKey, isDirty, updatedAt, isDeleted',
     exams: '++id, firebaseId, syncKey, examName, maxGrade, date, isDirty, updatedAt, isDeleted'
 });
+
+// 🔄 Auto-migrate legacy/malformed child IDs locally upon database ready
+import { runLocalIdMigration } from './migration';
+
+db.on('ready', () => {
+    return runLocalIdMigration().catch(err => {
+        console.warn('Auto local ID migration error on db ready:', err);
+    });
+});

@@ -3,6 +3,7 @@ import { db } from '../db/database';
 import { MapPin, UserPlus } from 'lucide-react';
 
 import useAutoSync from '../hooks/useAutoSync';
+import { ensureCleanChildId } from '../utils/idGenerator';
 
 const AddChild = () => {
     const [formData, setFormData] = useState({ name: '', phone: '', childPhone: '', lat: null, lng: null });
@@ -18,7 +19,7 @@ const AddChild = () => {
     const saveChild = async () => {
         const syncKey = localStorage.getItem('currentSyncKey');
         const now = new Date().toISOString();
-        const id = formData.id || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'id_' + Date.now());
+        const id = ensureCleanChildId(formData.id, formData.gender);
         await db.children.add({
             ...formData,
             id,

@@ -143,7 +143,7 @@ export default function ParentLogin() {
 
                 // 4. Save matching details and attendance locally to Dexie for offline dashboards
                 await db.children.put({
-                    id: parseInt(match.id, 10) || match.id,
+                    id: String(match.id),
                     name: match.name,
                     phone: match.phone || '',
                     motherPhone: match.motherPhone || '',
@@ -161,11 +161,11 @@ export default function ParentLogin() {
                         const data = docSnap.data();
                         if (data && data.payload) {
                             const record = decryptData(data.payload);
-                            if (record && parseInt(record.childId, 10) === parseInt(match.id, 10)) {
+                            if (record && String(record.childId) === String(match.id)) {
                                 localAttendanceRecords.push(record);
                             }
                         } else if (data) {
-                            if (data.childId === parseInt(match.id, 10)) {
+                            if (String(data.childId) === String(match.id)) {
                                 localAttendanceRecords.push(data);
                             }
                         }

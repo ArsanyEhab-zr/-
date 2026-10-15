@@ -4,6 +4,8 @@ import { collection, collectionGroup, getDocs, doc, setDoc, deleteDoc, getDoc, g
 
 // 🌟 استدعاء دوال التشفير وفك التشفير اللي عملناهم
 import { encryptData, decryptData } from '../encryption';
+import { runIdMigration } from './migration';
+import { ensureCleanChildId } from '../utils/idGenerator';
 
 // 🧹 فلتر سحري لتنظيف الداتا (أسرع من السرياليزيشن)
 const cleanData = (obj) => {
@@ -31,6 +33,13 @@ const _syncDataWithCloud = async () => {
 
         if (!currentSyncKey) {
             return { success: false, message: "❌ غير مصرح! برجاء تسجيل الدخول بمفتاح الكلاود الخاص بأسرتك أولاً." };
+        }
+
+        // 🧹 Ensure all records locally and on cloud adhere to clean structured ID format before sync
+        try {
+            await runIdMigration();
+        } catch (migErr) {
+            console.warn('⚠️ [Sync] Pre-sync ID migration warning:', migErr);
         }
 
         // 🌟 تفاصيل العمليات (Detailed Logs)
@@ -376,7 +385,8 @@ const _syncDataWithCloud = async () => {
             
             const localMatch = localChildrenMap.get(cloudChild.id);
             const syncKeyToSave = (isAdmin || isStageAdmin) ? (cloudChild.syncKey || currentSyncKey) : currentSyncKey;
-            const childToSave = { ...cloudChild, syncKey: String(syncKeyToSave), isDirty: false, isDeleted: false, updatedAt: cloudChild.updatedAt || now };
+            const cleanChildId = ensureCleanChildId(cloudChild.id, cloudChild.gender);
+            const childToSave = { ...cloudChild, id: cleanChildId, syncKey: String(syncKeyToSave), isDirty: false, isDeleted: false, updatedAt: cloudChild.updatedAt || now };
 
             if (!childToSave.id) continue;
 

@@ -40,6 +40,7 @@ import { firestore } from './db/firebase';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
 import { Download, AlertTriangle, Rocket } from 'lucide-react';
+import { runIdMigration } from './db/migration';
 
 const CalendarPage = lazy(() => import('./pages/CalendarPage'));
 const AddEventPage = lazy(() => import('./pages/AddEventPage'));
@@ -201,6 +202,11 @@ function App() {
 
   // 🌐 Global network listener — auto-syncs when coming back online
   useNetworkStatus();
+
+  // 🧹 Auto-migrate any legacy child IDs in Dexie and Firestore on app startup
+  useEffect(() => {
+    runIdMigration();
+  }, []);
 
   // السطر ده بيقرا هل الخادم مسجل دخول ولا لأ
   const isAuthenticated = !!localStorage.getItem('currentSyncKey');
