@@ -58,8 +58,15 @@ export default function ExcelImporter() {
         return { bMonth, bDay };
     };
 
+    const generateUniqueId = () => {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+            return crypto.randomUUID();
+        }
+        return 'id_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 9);
+    };
+
     const handleFileUpload = (e) => {
-        const file = e.target.files[0];
+        const file = e.target.files?.[0];
         if (!file) return;
         setIsImporting(true);
 
@@ -69,65 +76,153 @@ export default function ExcelImporter() {
             try {
                 const data = new Uint8Array(event.target.result);
                 const workbook = XLSX.read(data, { type: 'array' });
-                const sheetName = workbook.SheetNames[0];
+                const sheetName = workbook.SheetNames?.[0];
+                if (!sheetName || !workbook.Sheets[sheetName]) {
+                    alert("الملف فارغ أو لا يحتوي على أي شيتات صالحة!");
+                    setIsImporting(false);
+                    return;
+                }
+
                 const worksheet = workbook.Sheets[sheetName];
                 const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+                if (!jsonData || jsonData.length === 0) {
+                    alert("لا توجد بيانات في شيت الإكسيل المرفوع!");
+                    setIsImporting(false);
+                    return;
+                }
 
                 const existingChildren = await db.children.toArray();
                 const syncKey = localStorage.getItem('currentSyncKey');
                 const now = new Date().toISOString();
 
-                const formattedData = jsonData.map(row => {
+                // فلترة الصفوف الفارغة وتعقيم البيانات وإسناد Primary Key صالح ومؤكد
+                const sanitizedRows = [];
+
+                for (let idx = 0; idx < jsonData.length; idx++) {
+                    const row = jsonData[idx];
+                    const excelRowNum = idx + 2; // +2 لأن رأس الجدول في الإكسيل هو السطر 1
+
+                    if (!row || typeof row !== 'object') continue;
+
+                    // استبعاد الصفوف الفارغة تماماً
+                    const hasNonEmptyValue = Object.values(row).some(
+                        v => v !== null && v !== undefined && String(v).trim() !== ''
+                    );
+                    if (!hasNonEmptyValue) continue;
+
+                    const rawName = row["name"] || row["الاسم"];
+                    const name = rawName ? String(rawName).trim() : "";
+
+                    // استبعاد الصفوف التي تفتقر للاسم الأساسي
+                    if (!name) continue;
+
+                    // استخراج الـ ID الأصلي أو الكود أو توليد ID فريد صالح
+                    const rawId = (
+                        row["id"] || 
+                        row["ID"] || 
+                        row["code"] || 
+                        row["Code"] || 
+                        row["كود"] || 
+                        row["كود المخدوم"] || 
+                        ""
+                    ).toString().trim();
+
+                    const primaryKey = (rawId && rawId !== "لم يتم إنشاء كود") ? rawId : generateUniqueId();
+
                     const rawBirthDate = row["birthDate"] || row["تاريخ الميلاد"] || "";
-                    // استخدام المترجم الذكي هنا
                     const { bMonth, bDay } = parseArabicDate(rawBirthDate);
 
-                    return {
-                        name: row["name"] || row["الاسم"],
-                        motherPhone: String(row["motherPhone"] || row["تليفون الأم"] || ""),
-                        fatherPhone: String(row["fatherPhone"] || row["تليفون الأب"] || ""),
-                        childPhone: String(row["childPhone"] || row["تليفون المخدوم"] || ""),
-                        whatsappTarget: row["whatsappTarget"] || "mother",
-                        gender: (String(row["gender"] || row["النوع"] || "").trim() === "بنت") ? "بنت" : "ولد",
-                        address: row["address"] || row["المنطقة"] || "",
-                        detailedAddress: row["detailedAddress"] || row["العنوان"] || "",
-                        birthDate: rawBirthDate, // بنحتفظ بالنص الأصلي عشان العرض
-                        birthMonth: bMonth, // بنحفظ الشهر كـ رقم عشان الجوائز
-                        birthDay: bDay,     // بنحفظ اليوم كـ رقم
-                        fatherJob: row["fatherJob"] || row["وظيفة الأب"] || "",
-                        specialNotes: row["specialNotes"] || row["ملاحظات"] || "",
-                        fatherConfessor: row["fatherConfessor"] || row["أب الاعتراف"] || "",
-                        isOrdained: row["isOrdained"] === true || String(row["isOrdained"]).toUpperCase() === "TRUE" || String(row["مرسوم شماس"]) === "نعم" || false,
-                        ordinationRank: row["ordinationRank"] || row["الرتبة الشماسية"] || "",
-                        streak: Number(row["المواظبة"] || row["streak"] || 0),
-                        gotClothes: false,
-                        syncKey,
-                        isDirty: true,
-                        updatedAt: now,
-                        isDeleted: false
-                    };
-                });
+                    sanitizedRows.push({
+                        excelRowNum,
+                        childData: {
+                            id: primaryKey,
+                            name,
+                            phone: String(row["phone"] || row["تليفون آخر"] || row["تليفون"] || row["الهاتف"] || ""),
+                            motherPhone: String(row["motherPhone"] || row["تليفون الأم"] || ""),
+                            fatherPhone: String(row["fatherPhone"] || row["تليفون الأب"] || ""),
+                            childPhone: String(row["childPhone"] || row["تليفون المخدوم"] || ""),
+                            whatsappTarget: row["whatsappTarget"] || "mother",
+                            gender: (String(row["gender"] || row["النوع"] || "").trim() === "بنت") ? "بنت" : "ولد",
+                            address: row["address"] || row["المنطقة"] || "",
+                            detailedAddress: row["detailedAddress"] || row["العنوان"] || "",
+                            birthDate: rawBirthDate,
+                            birthMonth: bMonth,
+                            birthDay: bDay,
+                            fatherJob: row["fatherJob"] || row["وظيفة الأب"] || "",
+                            specialNotes: row["specialNotes"] || row["ملاحظات"] || "",
+                            fatherConfessor: row["fatherConfessor"] || row["أب الاعتراف"] || "",
+                            isOrdained: row["isOrdained"] === true || String(row["isOrdained"]).toUpperCase() === "TRUE" || String(row["مرسوم شماس"]) === "نعم" || false,
+                            ordinationRank: row["ordinationRank"] || row["الرتبة الشماسية"] || "",
+                            streak: Number(row["المواظبة"] || row["streak"] || 0),
+                            gotClothes: false,
+                            syncKey,
+                            isDirty: true,
+                            updatedAt: now,
+                            isDeleted: false
+                        }
+                    });
+                }
 
-                // تصفية السطور الفاضية
-                const validData = formattedData.filter(c => c.name);
+                if (sanitizedRows.length === 0) {
+                    alert("لم يتم العثور على أي صفوف صالحة للاستيراد في الملف (تأكد من وجود عمود 'الاسم' أو 'name').");
+                    setIsImporting(false);
+                    return;
+                }
 
-                for (const childData of validData) {
-                    const existingChild = existingChildren.find(c => c.name === childData.name);
-                    if (existingChild) {
-                        await db.children.update(existingChild.id, { ...childData, isDeleted: false });
-                    } else {
-                        await db.children.add(childData);
+                let successCount = 0;
+                const errorRows = [];
+
+                for (const { excelRowNum, childData } of sanitizedRows) {
+                    try {
+                        const existingChild = existingChildren.find(c => 
+                            (childData.id && c.id === childData.id) || 
+                            (c.name && childData.name && c.name.trim() === childData.name.trim())
+                        );
+
+                        if (existingChild) {
+                            const updated = { ...childData, id: existingChild.id, isDeleted: false };
+                            await db.children.update(existingChild.id, updated);
+                            Object.assign(existingChild, updated);
+                        } else {
+                            await db.children.add(childData);
+                            existingChildren.push({ ...childData });
+                        }
+                        successCount++;
+                    } catch (rowErr) {
+                        console.error(`خطأ في استيراد السطر ${excelRowNum} (${childData.name}):`, rowErr);
+                        errorRows.push({
+                            row: excelRowNum,
+                            name: childData.name,
+                            error: rowErr?.message || "خطأ غير معروف"
+                        });
                     }
                 }
 
-                triggerAutoSync();
-                alert(`مبروك! تم استيراد وتحديث ${validData.length} مخدوم بنجاح (بما فيها أعياد الميلاد)! 🎉`);
-                window.location.reload();
+                if (successCount > 0) {
+                    triggerAutoSync();
+                }
+
+                if (errorRows.length > 0) {
+                    const sampleErrors = errorRows.slice(0, 5).map(e => `سطر ${e.row} (${e.name}): ${e.error}`).join('\n');
+                    const remainingNotice = errorRows.length > 5 ? `\n... و ${errorRows.length - 5} صفوف أخرى.` : '';
+                    alert(`تم استيراد وتحديث ${successCount} مخدوم بنجاح! ⚠️\nتم تخطي ${errorRows.length} صف بسبب أخطاء:\n${sampleErrors}${remainingNotice}`);
+                } else {
+                    alert(`مبروك! تم استيراد وتحديث ${successCount} مخدوم بنجاح (بما فيها أعياد الميلاد)! 🎉`);
+                }
+
+                if (successCount > 0) {
+                    window.location.reload();
+                }
             } catch (err) {
                 console.error(err);
                 alert("حصلت مشكلة أثناء قراءة الملف! اتأكد من صحة البيانات.");
+            } finally {
+                setIsImporting(false);
+                if (e.target) {
+                    e.target.value = '';
+                }
             }
-            setIsImporting(false);
         };
 
         reader.readAsArrayBuffer(file);

@@ -18,8 +18,10 @@ const AddChild = () => {
     const saveChild = async () => {
         const syncKey = localStorage.getItem('currentSyncKey');
         const now = new Date().toISOString();
+        const id = formData.id || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'id_' + Date.now());
         await db.children.add({
             ...formData,
+            id,
             streak: 0,
             syncKey,
             isDirty: true,
