@@ -211,12 +211,15 @@ export default function ExcelImporter() {
                                 last_service: existingChild.last_service || null,
                                 last_tasbeha: childData.last_tasbeha || existingChild.last_tasbeha || null,
                                 last_visited: existingChild.last_visited || null,
-                                id: existingChild.id, 
+                                id: existingChild.id || childData.id, 
                                 isDeleted: false 
                             };
-                            await db.children.update(existingChild.id, updated);
+                            await db.children.put(updated);
                             Object.assign(existingChild, updated);
                         } else {
+                            if (!childData.id || typeof childData.id !== 'string' || childData.id.trim() === '') {
+                                childData.id = `child_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+                            }
                             await db.children.add(childData);
                             existingChildren.push({ ...childData });
                         }
