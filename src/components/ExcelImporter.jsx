@@ -98,6 +98,7 @@ export default function ExcelImporter() {
 
                 // فلترة الصفوف الفارغة وتعقيم البيانات وإسناد Primary Key صالح ومؤكد
                 const sanitizedRows = [];
+                const trimStr = (val) => (val !== null && val !== undefined ? String(val).trim() : "");
 
                 for (let idx = 0; idx < jsonData.length; idx++) {
                     const row = jsonData[idx];
@@ -112,54 +113,74 @@ export default function ExcelImporter() {
                     if (!hasNonEmptyValue) continue;
 
                     const rawName = row["name"] || row["الاسم"];
-                    const name = rawName ? String(rawName).trim() : "";
+                    const name = trimStr(rawName);
 
                     // استبعاد الصفوف التي تفتقر للاسم الأساسي
                     if (!name) continue;
 
                     // استخراج الـ ID الأصلي أو الكود أو توليد ID فريد صالح
-                    const rawId = (
+                    const rawId = trimStr(
                         row["id"] || 
                         row["ID"] || 
                         row["code"] || 
                         row["Code"] || 
                         row["كود"] || 
-                        row["كود المخدوم"] || 
-                        ""
-                    ).toString().trim();
+                        row["كود المخدوم"]
+                    );
 
-                    const primaryKey = (rawId && rawId !== "لم يتم إنشاء كود") ? rawId : generateUniqueId();
+                    const primaryKey = (rawId && rawId !== "لم يتم إنشاء كود") 
+                        ? rawId 
+                        : (row.id || row.code || `child_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
 
-                    const rawBirthDate = row["birthDate"] || row["تاريخ الميلاد"] || "";
+                    const rawBirthDate = trimStr(row["birthDate"] || row["تاريخ الميلاد"]);
                     const { bMonth, bDay } = parseArabicDate(rawBirthDate);
+
+                    const genderRaw = trimStr(row["gender"] || row["النوع"]).toLowerCase();
+                    const gender = (genderRaw === "بنت" || genderRaw === "girl" || genderRaw === "female") ? "بنت" : "ولد";
 
                     sanitizedRows.push({
                         excelRowNum,
                         childData: {
                             id: primaryKey,
                             name,
-                            phone: String(row["phone"] || row["تليفون آخر"] || row["تليفون"] || row["الهاتف"] || ""),
-                            motherPhone: String(row["motherPhone"] || row["تليفون الأم"] || ""),
-                            fatherPhone: String(row["fatherPhone"] || row["تليفون الأب"] || ""),
-                            childPhone: String(row["childPhone"] || row["تليفون المخدوم"] || ""),
-                            whatsappTarget: row["whatsappTarget"] || "mother",
-                            gender: (String(row["gender"] || row["النوع"] || "").trim() === "بنت") ? "بنت" : "ولد",
-                            address: row["address"] || row["المنطقة"] || "",
-                            detailedAddress: row["detailedAddress"] || row["العنوان"] || "",
+                            syncKey: syncKey || "",
+                            phone: trimStr(row["phone"] || row["تليفون آخر"] || row["تليفون"] || row["الهاتف"]),
+                            childPhone: trimStr(row["childPhone"] || row["تليفون المخدوم"]),
+                            motherPhone: trimStr(row["motherPhone"] || row["تليفون الأم"]),
+                            fatherPhone: trimStr(row["fatherPhone"] || row["تليفون الأب"]),
+                            whatsappTarget: trimStr(row["whatsappTarget"]) || "mother",
+                            gender,
+                            address: trimStr(row["address"] || row["المنطقة"]),
+                            detailedAddress: trimStr(row["detailedAddress"] || row["العنوان"]),
+                            gpsLink: trimStr(row["gpsLink"] || row["موقع البيت"]),
+                            profilePic: trimStr(row["profilePic"] || row["رابط الصورة المرفوعة"]),
                             birthDate: rawBirthDate,
                             birthMonth: bMonth,
                             birthDay: bDay,
-                            fatherJob: row["fatherJob"] || row["وظيفة الأب"] || "",
-                            specialNotes: row["specialNotes"] || row["ملاحظات"] || "",
-                            fatherConfessor: row["fatherConfessor"] || row["أب الاعتراف"] || "",
-                            isOrdained: row["isOrdained"] === true || String(row["isOrdained"]).toUpperCase() === "TRUE" || String(row["مرسوم شماس"]) === "نعم" || false,
-                            ordinationRank: row["ordinationRank"] || row["الرتبة الشماسية"] || "",
-                            streak: Number(row["المواظبة"] || row["streak"] || 0),
+                            fatherJob: trimStr(row["fatherJob"] || row["وظيفة الأب"]),
+                            specialNotes: trimStr(row["specialNotes"] || row["ملاحظات"]),
+                            fatherConfessor: trimStr(row["fatherConfessor"] || row["أب الاعتراف"]),
+                            isOrdained: row["isOrdained"] === true || String(row["isOrdained"]).toUpperCase() === "TRUE" || trimStr(row["مرسوم شماس"]) === "نعم",
+                            ordinationRank: trimStr(row["ordinationRank"] || row["الرتبة الشماسية"]),
+                            streak: Number(row["المواظبة"] || row["streak"] || 0) || 0,
+                            last_liturgy: null,
+                            last_service: null,
+                            last_tasbeha: trimStr(row["last_tasbeha"] || row["آخر حضور تسبحة"]) || null,
+                            last_visited: null,
+                            last_birthday_gift: null,
+                            last_reward_date: null,
+                            isBrother: false,
                             gotClothes: false,
-                            syncKey,
                             isDirty: true,
                             updatedAt: now,
-                            isDeleted: false
+                            isDeleted: false,
+                            massAttendance: 0,
+                            preparation: "",
+                            serviceMeetingAttendance: 0,
+                            visitationParticipation: 0,
+                            lastConfessionDate: null,
+                            activityParticipation: "",
+                            medicalStatus: trimStr(row["medicalStatus"] || row["الحالة الصحية"])
                         }
                     });
                 }
@@ -181,7 +202,18 @@ export default function ExcelImporter() {
                         );
 
                         if (existingChild) {
-                            const updated = { ...childData, id: existingChild.id, isDeleted: false };
+                            const updated = { 
+                                ...existingChild, 
+                                ...childData, 
+                                profilePic: childData.profilePic || existingChild.profilePic || "",
+                                streak: childData.streak || existingChild.streak || 0,
+                                last_liturgy: existingChild.last_liturgy || null,
+                                last_service: existingChild.last_service || null,
+                                last_tasbeha: childData.last_tasbeha || existingChild.last_tasbeha || null,
+                                last_visited: existingChild.last_visited || null,
+                                id: existingChild.id, 
+                                isDeleted: false 
+                            };
                             await db.children.update(existingChild.id, updated);
                             Object.assign(existingChild, updated);
                         } else {
