@@ -1,5 +1,6 @@
 import React, { useState, useEffect, Suspense, lazy } from 'react';
 import useNetworkStatus from './hooks/useNetworkStatus';
+import useRealtimeChildren from './hooks/useRealtimeChildren';
 import { Routes, Route, useLocation, Navigate } from 'react-router-dom';
 
 const Home = lazy(() => import('./pages/Home'));
@@ -202,6 +203,9 @@ function App() {
 
   // 🌐 Global network listener — auto-syncs when coming back online
   useNetworkStatus();
+
+  // 🔄 Global real-time listener — syncs child deletions and additions with Firestore in real-time
+  useRealtimeChildren();
 
   // 🧹 Auto-migrate any legacy child IDs in Dexie and Firestore on app startup
   useEffect(() => {

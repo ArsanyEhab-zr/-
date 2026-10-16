@@ -19,6 +19,7 @@ import useAutoSync from '../hooks/useAutoSync';
 import { calculateExactAge } from '../utils/dateUtils';
 import ExcelImporter from '../components/ExcelImporter';
 import { generateChildId } from '../utils/idGenerator';
+import { safePurgeLocalChild } from '../db/sync';
 
 const getSettings = () => {
     const defaults = {
@@ -671,9 +672,60 @@ function KidsManagerView({ childrenData }) {
     };
 
     const handleDelete = async (id) => {
-        if (window.confirm("متأكد إنك عايز تمسح المخدوم ده نهائياً؟")) {
-            const now = new Date().toISOString();
+        if (!window.confirm("متأكد إنك عايز تمسح المخدوم ده نهائياً؟")) return;
+
+        const now = new Date().toISOString();
+        try {
+            const child = await db.children.get(id);
+            const targetKey = child?.syncKey || currentSyncKey;
+
+            // 1. Soft-delete locally first so Dexie useLiveQuery filters it out immediately
             await db.children.update(id, { isDeleted: true, isDirty: true, updatedAt: now });
+
+            // Also soft-delete linked attendance and grades safely
+            try {
+                const strId = String(id).trim();
+                if (strId) {
+                    await db.attendance.where('childId').equals(strId).modify({ isDeleted: true, isDirty: true, updatedAt: now });
+                    await db.grades.where('childId').equals(strId).modify({ isDeleted: true, isDirty: true, updatedAt: now });
+                    const numId = Number(strId);
+                    if (!isNaN(numId) && Number.isFinite(numId)) {
+                        await db.attendance.where('childId').equals(numId).modify({ isDeleted: true, isDirty: true, updatedAt: now });
+                        await db.grades.where('childId').equals(numId).modify({ isDeleted: true, isDirty: true, updatedAt: now });
+                    }
+                }
+            } catch (modErr) {
+                console.warn('⚠️ [handleDelete] Note during local soft-delete modification:', modErr?.message);
+            }
+
+            // 2. Direct Firestore Deletion: Immediately remove document from Firestore if online
+            if (navigator.onLine && targetKey && targetKey !== 'MASTER_ACCESS' && targetKey !== 'ADMIN_MODE' && targetKey !== 'STAGE_ADMIN') {
+                const childDocRef = doc(firestore, 'Osras', targetKey, 'children', String(id));
+                await deleteDoc(childDocRef);
+
+                // Clean up any cloud attendance documents for this child
+                try {
+                    const attSnap = await getDocs(collection(firestore, 'Osras', targetKey, 'attendance'));
+                    const attToDelete = (attSnap.docs || []).filter(d => d.id.includes(`_${id}_`));
+                    await Promise.all(attToDelete.map(d => deleteDoc(d.ref)));
+                } catch (attErr) {
+                    console.warn("⚠️ [handleDelete] Attendance cloud cleanup note:", attErr);
+                }
+
+                // Hard-purge from local database now that cloud confirmed deletion
+                await safePurgeLocalChild(id);
+
+                console.log(`✅ [handleDelete] Child ${id} removed directly from Firestore and Dexie.`);
+            } else {
+                // If offline or special admin key, trigger background auto-sync to push tombstone upon reconnection
+                triggerAutoSync();
+            }
+        } catch (error) {
+            console.error("❌ [handleDelete] Error during deletion:", error);
+            // Ensure child is marked dirty/deleted locally so background sync retries
+            try {
+                await db.children.update(id, { isDeleted: true, isDirty: true, updatedAt: now });
+            } catch (_) {}
             triggerAutoSync();
         }
     };

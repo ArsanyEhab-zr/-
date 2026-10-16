@@ -20,20 +20,25 @@ export default function Visitation() {
     // 🔐 عزل البيانات: كل أسرة تشوف أطفالها بس
     const currentSyncKey = String(localStorage.getItem('currentSyncKey') || '');
     const isMaster = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE';
-    const children = useLiveQuery(() => {
+    const children = useLiveQuery(async () => {
+        let kids = [];
         if (isMaster) {
-            return searchQuery
-                ? db.children.where('name').startsWithIgnoreCase(searchQuery).toArray()
-                : db.children.toArray();
+            kids = searchQuery
+                ? await db.children.where('name').startsWithIgnoreCase(searchQuery).toArray()
+                : await db.children.toArray();
+        } else if (!currentSyncKey) {
+            return [];
+        } else {
+            kids = await db.children.where('syncKey').equals(currentSyncKey).toArray();
+            if (searchQuery) {
+                kids = kids.filter(c => c.name?.toLowerCase().startsWith(searchQuery.toLowerCase()));
+            }
         }
-        if (!currentSyncKey) return [];
-        return db.children.where('syncKey').equals(currentSyncKey).toArray()
-            .then(arr => searchQuery
-                ? arr.filter(c => c.name?.toLowerCase().startsWith(searchQuery.toLowerCase()))
-                : arr);
+        return (kids || []).filter(c => !c.isDeleted);
     }, [searchQuery, currentSyncKey, isMaster]);
 
     const filteredChildren = children?.filter((c) => {
+        if (c.isDeleted) return false;
         if (activeFilter === "boys" && c.gender === "بنت") return false;
         if (activeFilter === "girls" && c.gender !== "بنت") return false;
         return true;

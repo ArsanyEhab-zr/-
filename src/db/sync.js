@@ -26,6 +26,59 @@ const formatDetailedList = (list) => {
     return `${safeList.slice(0, 4).join('، ')} ... (+${safeList.length - 4} آخرين)`;
 };
 
+/**
+ * 🛡️ Safely deletes a child and their associated attendance/grades from local Dexie.
+ * Strictly validates childId to prevent IDBKeyRange DataErrors on invalid or NaN keys.
+ * 
+ * @param {any} rawId - The child ID
+ */
+export const safePurgeLocalChild = async (rawId) => {
+    if (!rawId || (typeof rawId !== 'string' && typeof rawId !== 'number')) {
+        console.warn('Skipping attendance cleanup for invalid childId:', rawId);
+        return;
+    }
+
+    const childId = String(rawId).trim();
+    if (!childId) {
+        console.warn('Skipping attendance cleanup for empty childId:', rawId);
+        return;
+    }
+
+    try {
+        // 1. Delete child record by string ID
+        await db.children.delete(childId);
+
+        // Check if numeric ID exists (e.g. legacy numeric autoincrement ID)
+        const numId = Number(childId);
+        const hasValidNumId = !isNaN(numId) && Number.isFinite(numId);
+        if (hasValidNumId) {
+            await db.children.delete(numId);
+        }
+
+        // 2. Safely clean up attendance records
+        try {
+            await db.attendance.where('childId').equals(childId).delete();
+            if (hasValidNumId) {
+                await db.attendance.where('childId').equals(numId).delete();
+            }
+        } catch (attErr) {
+            console.warn('Skipping attendance cleanup due to error:', attErr?.message);
+        }
+
+        // 3. Safely clean up grades records
+        try {
+            await db.grades.where('childId').equals(childId).delete();
+            if (hasValidNumId) {
+                await db.grades.where('childId').equals(numId).delete();
+            }
+        } catch (grdErr) {
+            console.warn('Skipping grades cleanup due to error:', grdErr?.message);
+        }
+    } catch (err) {
+        console.warn('Error during safePurgeLocalChild:', childId, err?.message);
+    }
+};
+
 const _syncDataWithCloud = async () => {
     try {
         // 🔐 1. هنجيب مفتاح الكلاود 
@@ -241,7 +294,14 @@ const _syncDataWithCloud = async () => {
             // 🪦 Tombstone handling: if record is soft-deleted, delete from cloud then purge locally
             if (child.isDeleted) {
                 try { await deleteDoc(docRef); } catch (_e) { /* ignore if not found */ }
-                await db.children.delete(child.id);
+                try {
+                    const attSnap = await getDocs(collection(firestore, 'Osras', targetKey, 'attendance'));
+                    const attToDelete = (attSnap.docs || []).filter(d => d.id.includes(`_${child.id}_`));
+                    await Promise.all(attToDelete.map(d => deleteDoc(d.ref)));
+                } catch (_e) { /* ignore */ }
+
+                await safePurgeLocalChild(child.id);
+
                 pushLog.children.push(`🗑️${(child.name || '').split(' ')[0]}`);
                 pushedChildrenIds.add(child.id);
                 continue;
@@ -383,6 +443,12 @@ const _syncDataWithCloud = async () => {
         try { for (const cloudChild of cloudChildren) {
             if (pushedChildrenIds.has(cloudChild.id)) continue; // Skip records we just pushed
             
+            // 🪦 If cloud record itself has isDeleted: true, purge locally immediately
+            if (cloudChild.isDeleted) {
+                await safePurgeLocalChild(cloudChild.id);
+                continue;
+            }
+
             const localMatch = localChildrenMap.get(cloudChild.id);
             const syncKeyToSave = (isAdmin || isStageAdmin) ? (cloudChild.syncKey || currentSyncKey) : currentSyncKey;
             const cleanChildId = ensureCleanChildId(cloudChild.id, cloudChild.gender);
@@ -402,6 +468,43 @@ const _syncDataWithCloud = async () => {
                 }
             }
         } } catch(e) { console.error('Error syncing children pull:', e); }
+
+        // 🗑️ 6a. مزامنة الحذف (Pull Deletion Reconciliation)
+        // أي طفل محلي غير معدل (clean) وينتمي للفصل المسحوب ولكنه غير موجود في السحابة
+        // معناه تم حذفه على السحابة بواسطة خادم آخر ويجب حذفه محلياً فوراً
+        try {
+            const pulledSyncKeys = new Set();
+            if (!isAdmin && !isStageAdmin && currentSyncKey) {
+                pulledSyncKeys.add(String(currentSyncKey));
+            } else if (isStageAdmin) {
+                allowedClasses.forEach(k => pulledSyncKeys.add(String(k)));
+            }
+
+            for (const localChild of localChildren) {
+                if (localChild.isDirty || pushedChildrenIds.has(localChild.id)) continue;
+
+                const childSyncKey = String(localChild.syncKey || '');
+                const isInPulledScope = isAdmin || (childSyncKey && pulledSyncKeys.has(childSyncKey));
+
+                if (isInPulledScope && !cloudChildrenMap.has(localChild.id) && !cloudChildrenMap.has(String(localChild.id))) {
+                    console.log(`🗑️ [Sync Pull] Reconciling cloud-deleted child: ${localChild.id} (${localChild.name})`);
+
+                    const childId = (localChild.id !== undefined && localChild.id !== null) ? String(localChild.id).trim() : null;
+                    if (!childId || typeof childId !== 'string') {
+                        console.warn('Skipping attendance cleanup for invalid childId:', localChild.id);
+                        continue;
+                    }
+
+                    try {
+                        await safePurgeLocalChild(childId);
+                    } catch (err) {
+                        console.warn('Error purging deleted child in reconciliation:', err?.message);
+                    }
+                }
+            }
+        } catch (recErr) {
+            console.error('Error during pull deletion reconciliation:', recErr);
+        }
 
         const localEventsMap = new Map(localEvents.map(e => [e.id, e]));
         try { for (const cloudEvent of cloudEvents) {
