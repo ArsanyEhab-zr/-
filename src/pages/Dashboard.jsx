@@ -1,5 +1,5 @@
 /* eslint-disable no-unused-vars */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { uploadImageToCloudinary } from '../utils/cloudinary';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
@@ -281,10 +281,25 @@ function StatsView({ childrenData, appSettings }) {
     const currentYear = new Date().getFullYear();
     const currentMonthPrefix = `${currentYear}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
     
-    // 🌟 جلب داتا الغياب لشهر الحالي عشان نرسم بيها الإحصائيات (أسرع في الأداء السحابي والمحلي)
-    const attendanceData = useLiveQuery(() => 
-        db.attendance.filter(a => a.date && a.date.startsWith(currentYear.toString())).toArray()
-    ) || [];
+    // 🌟 جلب داتا الغياب لشهر الحالي عشان نرسم بيها الإحصائيات — مع فلترة دقيقة بالـ syncKey وحذف المكرر
+    const childIdSet = useMemo(() => new Set(childrenData.map(c => String(c.id))), [childrenData]);
+
+    const attendanceData = useLiveQuery(async () => {
+        const rawAtt = await db.attendance
+            .filter(a => a.date && a.date.startsWith(currentYear.toString()) && !a.isDeleted)
+            .toArray();
+        
+        // Deduplicate by composite key: date_childId_type (keep the latest by updatedAt)
+        const bestByKey = new Map();
+        for (const record of rawAtt) {
+            const compositeKey = `${record.date}_${record.childId}_${record.type}`;
+            const existing = bestByKey.get(compositeKey);
+            if (!existing || (record.updatedAt || '') > (existing.updatedAt || '')) {
+                bestByKey.set(compositeKey, record);
+            }
+        }
+        return Array.from(bestByKey.values());
+    }, [currentYear]) || [];
 
     // ─── 📊 1. حساب إحصائيات الحضور لجُمع الشهر الحالي ───
     const getFridaysOfCurrentMonth = () => {
@@ -306,10 +321,16 @@ function StatsView({ childrenData, appSettings }) {
 
     const monthFridays = getFridaysOfCurrentMonth();
 
+    // 🛡️ Scope attendance counts to ONLY children in this class (eliminates 44→88 cross-class inflation)
+    const scopedAttendance = useMemo(() => 
+        attendanceData.filter(a => childIdSet.has(String(a.childId))),
+        [attendanceData, childIdSet]
+    );
+
     const attendanceStats = monthFridays.map((friday, index) => {
-        const serviceCount = attendanceData.filter(a => a.date === friday && a.type === 'service').length;
-        const liturgyCount = attendanceData.filter(a => a.date === friday && a.type === 'liturgy').length;
-        const tasbehaCount = attendanceData.filter(a => a.date === friday && a.type === 'tasbeha').length;
+        const serviceCount = scopedAttendance.filter(a => a.date === friday && a.type === 'service').length;
+        const liturgyCount = scopedAttendance.filter(a => a.date === friday && a.type === 'liturgy').length;
+        const tasbehaCount = scopedAttendance.filter(a => a.date === friday && a.type === 'tasbeha').length;
         return {
             date: friday,
             label: `الجمعة ${index + 1}`,
@@ -358,8 +379,8 @@ function StatsView({ childrenData, appSettings }) {
             // حساب العمر
             const calculatedAge = calculateExactAge(c.birthDate);
 
-            // حساب الحضور
-            const childAtt = attendanceData.filter(a => a.childId === c.id);
+            // حساب الحضور — باستخدام الداتا المفلترة والمنقحة من التكرار
+            const childAtt = scopedAttendance.filter(a => String(a.childId) === String(c.id));
             const totalService = childAtt.filter(a => a.type === 'service').length;
             const totalLiturgy = childAtt.filter(a => a.type === 'liturgy').length;
             const totalTasbeha = childAtt.filter(a => a.type === 'tasbeha').length;

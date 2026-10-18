@@ -86,9 +86,9 @@ export default function Attendance() {
         return true;
     }) || [];
 
-    const liturgyCount = attendanceRecords?.filter(a => a.type === 'liturgy' && filteredChildren.some(c => c.id === a.childId)).length || 0;
-    const serviceCount = attendanceRecords?.filter(a => a.type === 'service' && filteredChildren.some(c => c.id === a.childId)).length || 0;
-    const tasbehaCount = attendanceRecords?.filter(a => a.type === 'tasbeha' && filteredChildren.some(c => c.id === a.childId)).length || 0;
+    const liturgyCount = attendanceRecords?.filter(a => a.type === 'liturgy' && !a.isDeleted && filteredChildren.some(c => c.id === a.childId)).length || 0;
+    const serviceCount = attendanceRecords?.filter(a => a.type === 'service' && !a.isDeleted && filteredChildren.some(c => c.id === a.childId)).length || 0;
+    const tasbehaCount = attendanceRecords?.filter(a => a.type === 'tasbeha' && !a.isDeleted && filteredChildren.some(c => c.id === a.childId)).length || 0;
 
     const getReportData = () => {
         let list = [];

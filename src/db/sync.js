@@ -674,7 +674,7 @@ const _syncDataWithCloud = async () => {
             }
         }
 
-        // 2d. سحب الغياب (Attendance Pull)
+        // 2d. سحب الغياب مع مطابقة صارمة ومنع التكرار (Attendance Pull & Strict Reconciliation)
         let cloudAttendance = [];
         if (isAdmin) {
             const attSnap = await getDocs(collectionGroup(firestore, 'attendance'));
@@ -687,18 +687,70 @@ const _syncDataWithCloud = async () => {
             cloudAttendance = (attSnap?.docs || []).map(processCloudDoc).filter(Boolean);
         }
 
-        const localAttList = await db.attendance.toArray();
-        const localAttendanceMap = new Map(localAttList.map(a => [`${a.date}_${a.childId}_${a.type}`, a]));
-
+        // Build cloud attendance keyed map for reconciliation
+        const cloudAttendanceKeys = new Set();
+        const cloudAttByKey = new Map();
         for (const cAtt of cloudAttendance) {
-            const docId = `${cAtt.date}_${cAtt.childId}_${cAtt.type}`;
-            if (pushedAttendanceIds.has(docId)) continue;
+            if (!cAtt.date || !cAtt.childId || !cAtt.type) continue;
+            const compositeKey = `${cAtt.date}_${cAtt.childId}_${cAtt.type}`;
+            cloudAttendanceKeys.add(compositeKey);
+            // Keep the newest cloud record per key
+            const existing = cloudAttByKey.get(compositeKey);
+            if (!existing || (cAtt.updatedAt || '') > (existing.updatedAt || '')) {
+                cloudAttByKey.set(compositeKey, cAtt);
+            }
+        }
 
-            if (!localAttendanceMap.has(docId)) {
+        // Fetch all local attendance and group by composite key for dedup
+        const localAttList = await db.attendance.toArray();
+        const localAttByKey = new Map(); // compositeKey -> array of local records
+        for (const la of localAttList) {
+            const key = `${la.date}_${la.childId}_${la.type}`;
+            if (!localAttByKey.has(key)) localAttByKey.set(key, []);
+            localAttByKey.get(key).push(la);
+        }
+
+        // 🛡️ Phase 1: Deduplicate local attendance — only keep one record per composite key
+        for (const [key, records] of localAttByKey.entries()) {
+            if (records.length <= 1) continue;
+            // Sort by: non-deleted first, then newest updatedAt
+            records.sort((a, b) => {
+                if (a.isDeleted !== b.isDeleted) return a.isDeleted ? 1 : -1;
+                return (b.updatedAt || '') > (a.updatedAt || '') ? 1 : -1;
+            });
+            // Keep the first (best), delete the rest
+            for (let i = 1; i < records.length; i++) {
+                try { await db.attendance.delete(records[i].id); } catch (_) {}
+            }
+            localAttByKey.set(key, [records[0]]); // Update map to reflect dedup
+        }
+
+        // 🛡️ Phase 2: Pull cloud records not present locally, or update existing ones
+        for (const [compositeKey, cAtt] of cloudAttByKey.entries()) {
+            if (pushedAttendanceIds.has(compositeKey)) continue;
+
+            const localMatches = localAttByKey.get(compositeKey);
+            if (!localMatches || localMatches.length === 0) {
                 const { id: _id, ...dataToInsert } = cAtt;
                 const syncKeyToSave = (isAdmin || isStageAdmin) ? (dataToInsert.syncKey || currentSyncKey) : currentSyncKey;
                 await db.attendance.add({ ...dataToInsert, syncKey: String(syncKeyToSave), isDirty: false, isDeleted: false, updatedAt: cAtt.updatedAt || now });
                 pullLog.attendanceAdded.push(`${cAtt.childId}(${cAtt.date.slice(5)})`);
+            } else {
+                // Update existing local record if cloud is newer and local isn't dirty
+                const local = localMatches[0];
+                if (!local.isDirty && (cAtt.updatedAt || '') > (local.updatedAt || '')) {
+                    const syncKeyToSave = (isAdmin || isStageAdmin) ? (cAtt.syncKey || currentSyncKey) : currentSyncKey;
+                    await db.attendance.update(local.id, { ...cAtt, id: local.id, syncKey: String(syncKeyToSave), isDirty: false, isDeleted: false, updatedAt: cAtt.updatedAt || now });
+                }
+            }
+        }
+
+        // 🛡️ Phase 3: Purge deleted local attendance records
+        for (const [key, records] of localAttByKey.entries()) {
+            for (const rec of records) {
+                if (rec.isDeleted) {
+                    try { await db.attendance.delete(rec.id); } catch (_) {}
+                }
             }
         }
 

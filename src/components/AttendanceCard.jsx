@@ -23,21 +23,35 @@ const AttendanceCard = ({ child, onEdit }) => {
     const toggleAttendance = async () => {
         const syncKey = localStorage.getItem('currentSyncKey');
         const now = new Date().toISOString();
+        const type = 'service'; // AttendanceCard always records service attendance
 
         if (!attendedToday) {
-            // تسجيل حضور وزيادة المواظبة
-            await db.attendance.add({ 
-                date: today, 
-                childId: child.id,
-                syncKey,
-                isDirty: true,
-                updatedAt: now,
-                isDeleted: false
-            });
+            // 🛡️ Dedup guard: check for existing active records first
+            const existingRecords = await db.attendance
+                .where('date').equals(today)
+                .toArray();
+            const alreadyExists = existingRecords.find(
+                a => a.childId === child.id && a.type === type && !a.isDeleted
+            );
+
+            if (!alreadyExists) {
+                // تسجيل حضور وزيادة المواظبة
+                await db.attendance.add({ 
+                    date: today, 
+                    childId: child.id,
+                    type,
+                    status: 'present',
+                    syncKey,
+                    isDirty: true,
+                    updatedAt: now,
+                    isDeleted: false
+                });
+            }
             const newStreak = (child.streak || 0) + 1;
             await db.children.update(child.id, {
                 streak: newStreak,
                 last_attended: today,
+                last_service: today,
                 isDirty: true,
                 updatedAt: now
             });
@@ -51,7 +65,16 @@ const AttendanceCard = ({ child, onEdit }) => {
                 isDirty: true,
                 updatedAt: now
             });
-            // We should also soft-delete the attendance record, but since this card just pushes simple updates to child streak and attendance without specifically querying the record ID to delete, it might be tricky. Wait, `toggleAttendance` in Dashboard attendance card only modifies `child.streak`. The attendance record added above is not deleted directly here (it doesn't have the `id` easily available). However, Attendance.jsx handles full toggle. Let's just update child.
+            // Soft-delete the attendance record for this child/date/type
+            const existingRecords = await db.attendance
+                .where('date').equals(today)
+                .toArray();
+            const matchingRecord = existingRecords.find(
+                a => a.childId === child.id && a.type === type && !a.isDeleted
+            );
+            if (matchingRecord) {
+                await db.attendance.update(matchingRecord.id, { isDeleted: true, isDirty: true, updatedAt: now });
+            }
             setAttendedToday(false);
         }
         triggerAutoSync();
