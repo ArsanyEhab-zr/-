@@ -67,10 +67,14 @@ export default function Home() {
     }, []);
 
     // 🔐 عزل البيانات: كل أسرة تشوف أطفالها بس
-    const children = useLiveQuery(() => {
-        if (isMaster) return db.children.toArray();
-        if (!currentSyncKey) return [];
-        return db.children.where('syncKey').equals(currentSyncKey).toArray();
+    const children = useLiveQuery(async () => {
+        let kids = [];
+        if (isMaster) {
+            kids = await db.children.toArray();
+        } else if (currentSyncKey) {
+            kids = await db.children.where('syncKey').equals(currentSyncKey).toArray();
+        }
+        return (kids || []).filter(c => !c.isDeleted);
     }, [currentSyncKey, isMaster]);
 
     // 🌟 عدد الأحداث العامة الغير مقروءة

@@ -4,7 +4,8 @@ import { db } from '../db/database';
 import { firestore } from '../db/firebase';
 import { collection, collectionGroup, onSnapshot } from 'firebase/firestore';
 import { decryptData } from '../encryption';
-import { ensureCleanChildId } from '../utils/idGenerator';
+import { ensureCleanChildId, isCleanChildId } from '../utils/idGenerator';
+import { normalizeArabicName } from '../utils/nameUtils';
 import { safePurgeLocalChild } from '../db/sync';
 
 /**
@@ -15,8 +16,8 @@ import { safePurgeLocalChild } from '../db/sync';
  * 
  * - When a servant deletes a child on Device A, Firestore fires a 'removed' event
  *   or tombstone which purges the child from local Dexie on Device B instantly (<200ms).
- * - Also reconciles missing documents on initial/subsequent snapshots so deletions that
- *   occurred while the app was closed are removed immediately upon launch.
+ * - Also performs strict reconciliation on snapshot arrival so ghost records,
+ *   duplicate records, and stale pre-migration records are purged immediately.
  */
 export default function useRealtimeChildren() {
     const location = useLocation();
@@ -43,16 +44,16 @@ export default function useRealtimeChildren() {
 
         if (!currentSyncKey) return;
 
-        const isMaster = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE';
-        const isStageAdmin = currentSyncKey === 'STAGE_ADMIN';
-        let allowedClasses = [];
+        let parsedServant = {};
         try {
-            const parsedServant = JSON.parse(currentServantStr);
-            allowedClasses = parsedServant.allowedClasses || [];
+            parsedServant = JSON.parse(currentServantStr);
         } catch (_) {}
+        const allowedClasses = parsedServant.allowedClasses || [];
+        const isMaster = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE' || parsedServant.role === 'كاهن' || parsedServant.role === 'أدمن مساعد' || parsedServant.role === 'Super Admin';
+        const isStageAdmin = currentSyncKey === 'STAGE_ADMIN' || parsedServant.role === 'أمين مرحلة';
 
         /**
-         * Process Firestore snapshot changes and reconcile with local Dexie database
+         * Process Firestore snapshot changes and strictly reconcile with local Dexie database
          */
         const handleSnapshot = async (snapshot, targetClassKey = null) => {
             if (!snapshot || isProcessingRef.current) return;
@@ -60,10 +61,32 @@ export default function useRealtimeChildren() {
 
             try {
                 const changes = snapshot.docChanges();
-                const cloudDocIds = new Set(snapshot.docs.map(d => d.id));
+                const cloudDocIds = new Set();
+                const cloudNameMap = new Map(); // normalizedName -> canonicalDocId
                 const toDeleteIds = new Set();
                 const toPut = [];
+                const now = new Date().toISOString();
 
+                // 1. Build authoritative sets from all docs in the snapshot
+                for (const docSnap of snapshot.docs) {
+                    if (docSnap.id === '_placeholder') continue;
+                    const rawData = docSnap.data();
+                    if (!rawData || rawData.placeholder || rawData.isPlaceholder) continue;
+
+                    let data = rawData.payload ? decryptData(rawData.payload) : rawData;
+                    if (!data) continue;
+
+                    const childId = String(data.id || docSnap.id);
+                    cloudDocIds.add(childId);
+                    cloudDocIds.add(String(docSnap.id));
+
+                    const normName = normalizeArabicName(data.name);
+                    if (normName) {
+                        cloudNameMap.set(normName, childId);
+                    }
+                }
+
+                // 2. Process incremental changes
                 for (const change of changes) {
                     const docId = change.doc.id;
                     if (docId === '_placeholder') continue;
@@ -77,13 +100,7 @@ export default function useRealtimeChildren() {
                         const rawData = change.doc.data();
                         if (!rawData || rawData.placeholder || rawData.isPlaceholder) continue;
 
-                        let data = null;
-                        if (rawData.payload) {
-                            data = decryptData(rawData.payload);
-                        } else {
-                            data = rawData;
-                        }
-
+                        let data = rawData.payload ? decryptData(rawData.payload) : rawData;
                         if (!data) continue;
 
                         const childId = data.id || docId;
@@ -107,33 +124,65 @@ export default function useRealtimeChildren() {
                                 syncKey: String(effectiveSyncKey || ''),
                                 isDirty: false,
                                 isDeleted: false,
-                                updatedAt: data.updatedAt || new Date().toISOString()
+                                updatedAt: data.updatedAt || now
                             });
                         }
                     }
                 }
 
-                // 🌟 Reconciliation: Check if any clean local child in this class is missing from Firestore
-                // (e.g., deleted while this device was offline/closed)
-                const scopeKey = targetClassKey || (!isMaster && !isStageAdmin ? currentSyncKey : null);
-                if (scopeKey) {
-                    const localScopedChildren = await db.children.where('syncKey').equals(scopeKey).toArray();
-                    for (const localChild of localScopedChildren) {
-                        if (!localChild.isDirty && !cloudDocIds.has(String(localChild.id))) {
+                // 3. Strict Cloud-to-Local Reconciliation Check
+                // Scoped query for local children
+                let localScopedChildren = [];
+                if (targetClassKey) {
+                    localScopedChildren = await db.children.where('syncKey').equals(targetClassKey).toArray();
+                } else if (!isMaster && !isStageAdmin) {
+                    localScopedChildren = await db.children.where('syncKey').equals(currentSyncKey).toArray();
+                } else if (isMaster) {
+                    localScopedChildren = await db.children.toArray();
+                }
+
+                for (const localChild of localScopedChildren) {
+                    const localIdStr = String(localChild.id);
+
+                    // a. Mark deleted records for purge
+                    if (localChild.isDeleted) {
+                        toDeleteIds.add(localChild.id);
+                        continue;
+                    }
+
+                    // b. Duplicate Name Safeguard:
+                    // If local record shares the same normalized name with a cloud record
+                    // but has a different/legacy ID, it is an obsolete duplicate!
+                    const normLocalName = normalizeArabicName(localChild.name);
+                    if (normLocalName && cloudNameMap.has(normLocalName)) {
+                        const canonicalId = cloudNameMap.get(normLocalName);
+                        if (localIdStr !== canonicalId && String(localChild.id) !== canonicalId) {
+                            console.log(`🧹 [RealtimeSync] Purging duplicate local child "${localChild.name}" (old ID: ${localChild.id}, canonical: ${canonicalId})`);
+                            toDeleteIds.add(localChild.id);
+                            continue;
+                        }
+                    }
+
+                    // c. Ghost / Cloud-Deleted Safeguard:
+                    // If local record is NOT in cloud snapshot:
+                    if (!cloudDocIds.has(localIdStr) && !cloudDocIds.has(String(localChild.id))) {
+                        // Is this a genuinely new offline record?
+                        const isFreshOffline = localChild.isDirty && !localChild.isDeleted && isCleanChildId(localChild.id);
+                        if (!isFreshOffline) {
+                            console.log(`🗑️ [RealtimeSync] Purging cloud-deleted/ghost local record "${localChild.name}" (ID: ${localChild.id})`);
                             toDeleteIds.add(localChild.id);
                         }
                     }
                 }
 
-                // 🗑️ Execute local Dexie deletions for removed/deleted children
+                // 4. Execute deletions in Dexie
                 if (toDeleteIds.size > 0) {
                     for (const delId of toDeleteIds) {
                         await safePurgeLocalChild(delId);
-                        console.log(`🗑️ [RealtimeSync] Synced child deletion: ${delId}`);
                     }
                 }
 
-                // 💾 Put new/updated children into Dexie
+                // 5. Bulk put updated/added children
                 if (toPut.length > 0) {
                     await db.children.bulkPut(toPut);
                 }
@@ -147,20 +196,37 @@ export default function useRealtimeChildren() {
 
         try {
             if (isMaster) {
-                const q = collectionGroup(firestore, 'children');
-                const unsub = onSnapshot(
-                    q, 
-                    snap => handleSnapshot(snap, null), 
-                    err => console.warn('⚠️ [RealtimeSync] Master query error:', err.message)
-                );
-                unsubsRef.current.push(unsub);
+                // Subscribe to each registered class individually for 100% precision and reliability
+                const saved = localStorage.getItem('appSettings');
+                const parsed = saved ? JSON.parse(saved) : {};
+                const activeOsraKeys = (parsed.services || []).flatMap(s => s.osras || []).map(o => o.syncKey).filter(Boolean);
+
+                if (activeOsraKeys.length > 0) {
+                    for (const classKey of activeOsraKeys) {
+                        const ref = collection(firestore, 'Osras', classKey, 'children');
+                        const unsub = onSnapshot(
+                            ref,
+                            snap => handleSnapshot(snap, classKey),
+                            err => console.warn(`⚠️ [RealtimeSync] Class ${classKey} error:`, err?.message)
+                        );
+                        unsubsRef.current.push(unsub);
+                    }
+                } else {
+                    const q = collectionGroup(firestore, 'children');
+                    const unsub = onSnapshot(
+                        q, 
+                        snap => handleSnapshot(snap, null), 
+                        err => console.warn('⚠️ [RealtimeSync] Master query error:', err?.message)
+                    );
+                    unsubsRef.current.push(unsub);
+                }
             } else if (isStageAdmin) {
                 for (const classKey of allowedClasses) {
                     const ref = collection(firestore, 'Osras', classKey, 'children');
                     const unsub = onSnapshot(
                         ref, 
                         snap => handleSnapshot(snap, classKey), 
-                        err => console.warn(`⚠️ [RealtimeSync] Stage class ${classKey} error:`, err.message)
+                        err => console.warn(`⚠️ [RealtimeSync] Stage class ${classKey} error:`, err?.message)
                     );
                     unsubsRef.current.push(unsub);
                 }
@@ -169,7 +235,7 @@ export default function useRealtimeChildren() {
                 const unsub = onSnapshot(
                     ref, 
                     snap => handleSnapshot(snap, currentSyncKey), 
-                    err => console.warn(`⚠️ [RealtimeSync] Class ${currentSyncKey} error:`, err.message)
+                    err => console.warn(`⚠️ [RealtimeSync] Class ${currentSyncKey} error:`, err?.message)
                 );
                 unsubsRef.current.push(unsub);
             }

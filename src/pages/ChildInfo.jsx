@@ -34,7 +34,7 @@ export default function ChildInfo() {
         );
     }
 
-    if (!child) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-center p-10 font-bold text-slate-500 animate-pulse font-sans">جاري تحميل بيانات المخدوم...</div>;
+    if (!child || child.isDeleted) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-center p-10 font-bold text-slate-500 font-sans">المخدوم غير موجود أو تم حذفه.</div>;
 
     const isGirl = child.gender === 'بنت';
     const themeColor = isGirl ? 'pink' : 'blue';

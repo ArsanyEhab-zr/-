@@ -12,6 +12,8 @@ import ExcelExporter from '../components/ExcelExporter';
 import ServantProfile from '../components/ServantProfile';
 import useAutoSync from '../hooks/useAutoSync';
 import { TENANT_CONFIG } from '../config/tenantConfig';
+import { syncDataWithCloud, reconcileAllClassesWithCloud } from '../db/sync';
+import { normalizeArabicName } from '../utils/nameUtils';
 
 export default function MasterDashboard() {
     const navigate = useNavigate();
@@ -32,22 +34,67 @@ export default function MasterDashboard() {
     const isAmin = currentServant.role === 'أمين خدمة' || currentServant.role === 'أمين أسرة';
     const hasAccess = isSuperAdmin || isPriest || isAmin || isStageAdmin;
 
+    const allowedOsras = useMemo(() => {
+        if (isSuperAdmin || isPriest) {
+            return appSettings.services?.flatMap(s => s.osras || []) || [];
+        } else if (isStageAdmin) {
+            const allOsras = appSettings.services?.flatMap(s => s.osras || []) || [];
+            return allOsras.filter(o => (currentServant.allowedClasses || []).includes(o.syncKey));
+        } else if (isAmin) {
+            const myService = appSettings.services?.find(s => s.osras?.some(o => o.syncKey === currentSyncKey));
+            if (myService) return myService.osras || [];
+            return appSettings.services?.flatMap(s => s.osras || []) || [];
+        }
+        return [];
+    }, [appSettings, isSuperAdmin, isPriest, isAmin, isStageAdmin, currentSyncKey, currentServant.allowedClasses]);
+
     // States
     const children = useLiveQuery(async () => {
         if (!hasAccess) return [];
-        let kids = [];
+        let rawKids = [];
         if (isSuperAdmin || isPriest) {
-            kids = await db.children.toArray();
+            rawKids = await db.children.toArray();
         } else if (isStageAdmin) {
             const allowedSyncKeys = currentServant.allowedClasses || [];
-            kids = await db.children.filter(c => allowedSyncKeys.includes(c.syncKey)).toArray();
+            rawKids = await db.children.filter(c => allowedSyncKeys.includes(c.syncKey)).toArray();
         } else if (currentSyncKey) {
-            kids = await db.children.where('syncKey').equals(currentSyncKey).toArray();
+            rawKids = await db.children.where('syncKey').equals(currentSyncKey).toArray();
         }
         
-        // Unify: Exclude soft-deleted kids globally
-        return kids.filter(c => !c.isDeleted);
-    }, [hasAccess, isSuperAdmin, isPriest, isStageAdmin, currentSyncKey, currentServant.allowedClasses]);
+        // Strict Canonical Deduplication & Scoping:
+        // 1. Exclude soft-deleted records (isDeleted: true)
+        // 2. Exclude orphaned kids not belonging to any active allowedOsras
+        // 3. Deduplicate by canonical child ID and normalized name within the same class
+        const validAllowedKeys = new Set(allowedOsras.map(o => String(o.syncKey || '').trim()).filter(Boolean));
+        const seenIds = new Set();
+        const seenNameByClass = new Set();
+        const dedupedKids = [];
+
+        for (const kid of rawKids) {
+            if (!kid || kid.isDeleted) continue;
+
+            const kidSyncKey = String(kid.syncKey || '').trim();
+            if (validAllowedKeys.size > 0 && !validAllowedKeys.has(kidSyncKey)) {
+                continue;
+            }
+
+            const kidId = String(kid.id || '').trim();
+            if (!kidId || seenIds.has(kidId)) continue;
+
+            const normName = normalizeArabicName(kid.name);
+            const nameClassKey = `${kidSyncKey}___${normName}`;
+            if (normName && seenNameByClass.has(nameClassKey)) {
+                // Ghost duplicate from pre-migration with identical name in same class
+                continue;
+            }
+
+            seenIds.add(kidId);
+            if (normName) seenNameByClass.add(nameClassKey);
+            dedupedKids.push(kid);
+        }
+
+        return dedupedKids;
+    }, [hasAccess, isSuperAdmin, isPriest, isStageAdmin, currentSyncKey, currentServant.allowedClasses, allowedOsras]);
     const [selectedOsraKey, setSelectedOsraKey] = useState(sessionStorage.getItem('master_osraKey') || null);
     const [searchTerm, setSearchTerm] = useState(sessionStorage.getItem('master_search') || '');
     const [genderFilter, setGenderFilter] = useState(sessionStorage.getItem('master_gender') || 'ALL');
@@ -110,47 +157,76 @@ export default function MasterDashboard() {
     useEffect(() => sessionStorage.setItem('master_gender', genderFilter), [genderFilter]);
     useEffect(() => sessionStorage.setItem('master_viewMode', viewMode), [viewMode]);
 
-    const allowedOsras = useMemo(() => {
-        if (isSuperAdmin || isPriest) {
-            return appSettings.services?.flatMap(s => s.osras || []) || [];
-        } else if (isStageAdmin) {
-            const allOsras = appSettings.services?.flatMap(s => s.osras || []) || [];
-            return allOsras.filter(o => (currentServant.allowedClasses || []).includes(o.syncKey));
-        } else if (isAmin) {
-            const myService = appSettings.services?.find(s => s.osras?.some(o => o.syncKey === currentSyncKey));
-            if (myService) return myService.osras || [];
-            return appSettings.services?.flatMap(s => s.osras || []) || [];
-        }
-        return [];
-    }, [appSettings, isSuperAdmin, isPriest, isAmin, isStageAdmin, currentSyncKey, currentServant.allowedClasses]);
+    const [isRefreshing, setIsRefreshing] = useState(false);
 
-    // 🌟🌟 Auto-Pull: سحب الهيكل المركزي تلقائياً عند فتح الصفحة 🌟🌟
-    useEffect(() => {
-        const autoFetchStructure = async () => {
-            if (!navigator.onLine || !hasAccess) return;
+    // 🌟🌟 Auto-Pull: سحب الداتا السحابية والهيكل المركزي تلقائياً عند فتح الصفحة 🌟🌟
+    const performCloudSync = async (silent = false) => {
+        if (!navigator.onLine || !hasAccess) return;
+        setIsRefreshing(true);
+        try {
+            // 1. Fetch system structure (mainConfig)
+            const settingsRef = doc(firestore, 'System', 'mainConfig');
+            let snap;
             try {
-                const settingsRef = doc(firestore, 'System', 'mainConfig');
-                const snap = await getDoc(settingsRef);
-                if (snap.exists()) {
-                    const cloudConfig = snap.data();
-                    const localSettingsString = localStorage.getItem('appSettings');
-                    const localSettings = JSON.parse(localSettingsString || '{}');
+                snap = await getDocFromServer(settingsRef);
+            } catch (_) {
+                snap = await getDoc(settingsRef);
+            }
 
-                    const mergedSettings = {
-                        ...localSettings,
-                        services: cloudConfig.services || [],
-                        servants: cloudConfig.servants || []
-                    };
+            let freshOsras = allowedOsras;
+            if (snap.exists()) {
+                const cloudConfig = snap.data();
+                const localSettingsString = localStorage.getItem('appSettings');
+                const localSettings = JSON.parse(localSettingsString || '{}');
 
-                    localStorage.setItem('appSettings', JSON.stringify(mergedSettings));
-                    setAppSettings(mergedSettings);
-                    console.log('🔄 [MasterDashboard] Auto-pulled structure from cloud.');
+                const mergedSettings = {
+                    ...localSettings,
+                    services: cloudConfig.services || [],
+                    servants: cloudConfig.servants || []
+                };
+
+                localStorage.setItem('appSettings', JSON.stringify(mergedSettings));
+                setAppSettings(mergedSettings);
+
+                const cloudOsras = (cloudConfig.services || []).flatMap(s => s.osras || []).filter(o => o.syncKey);
+                if (cloudOsras.length > 0) {
+                    freshOsras = cloudOsras;
                 }
-            } catch (error) {
-                console.warn('[MasterDashboard] Auto-pull failed:', error.message);
+                console.log('🔄 [MasterDashboard] Auto-pulled structure from cloud.');
+            }
+
+            // 2. Strict Global Reconciliation across all classes in allowedOsras
+            console.log('🔄 [MasterDashboard] Reconciling all classes to eliminate ghost and duplicate records...');
+            await reconcileAllClassesWithCloud(freshOsras.length > 0 ? freshOsras : allowedOsras);
+
+            // 3. Trigger full cloud data sync
+            const result = await syncDataWithCloud();
+            if (!silent && result?.success) {
+                console.log('✅ [MasterDashboard] Cloud sync completed successfully.');
+            }
+        } catch (error) {
+            console.warn('[MasterDashboard] Cloud sync failed:', error.message);
+        } finally {
+            setIsRefreshing(false);
+        }
+    };
+
+    useEffect(() => {
+        performCloudSync(true);
+
+        // Also auto-refresh when mobile app / tab regains focus or visibility
+        const handleVisibilityOrFocus = () => {
+            if (navigator.onLine && document.visibilityState === 'visible') {
+                performCloudSync(true);
             }
         };
-        autoFetchStructure();
+
+        window.addEventListener('visibilitychange', handleVisibilityOrFocus);
+        window.addEventListener('focus', handleVisibilityOrFocus);
+        return () => {
+            window.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+            window.removeEventListener('focus', handleVisibilityOrFocus);
+        };
     }, [hasAccess]);
 
     const cleanPhoneForWhatsapp = (phone) => {
@@ -410,6 +486,17 @@ export default function MasterDashboard() {
                                 {selectedOsraKey && activeOsra ? `عرض بيانات: ${activeOsra.name}` : ((isSuperAdmin || isPriest) ? 'مراقبة جميع الأسر الكنسية' : 'مراقبة خدمتك الخاصة')}
                             </p>
                         </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => performCloudSync(false)}
+                            disabled={isRefreshing}
+                            title="تحديث ومزامنة البيانات مع السحابة فوراً"
+                            className="flex items-center gap-1.5 bg-white/20 hover:bg-white/30 active:scale-95 px-3 py-2 rounded-xl text-xs font-black transition-all backdrop-blur-md shrink-0 shadow-sm"
+                        >
+                            <RefreshCw size={15} className={isRefreshing ? 'animate-spin' : ''} />
+                            <span className="hidden sm:inline">{isRefreshing ? 'جاري التحديث...' : 'تحديث البيانات'}</span>
+                        </button>
                     </div>
                 </div>
             </header>

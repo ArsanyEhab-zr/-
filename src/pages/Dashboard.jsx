@@ -20,6 +20,8 @@ import { calculateExactAge } from '../utils/dateUtils';
 import ExcelImporter from '../components/ExcelImporter';
 import { generateChildId } from '../utils/idGenerator';
 import { safePurgeLocalChild } from '../db/sync';
+import { normalizeArabicName } from '../utils/nameUtils';
+import { compressImageToBase64 } from '../utils/imageUtils';
 
 const getSettings = () => {
     const defaults = {
@@ -49,28 +51,48 @@ export default function Dashboard() {
     const allowedClasses = currentServantObj.allowedClasses || [];
 
     const children = useLiveQuery(async () => {
-        let kids = [];
+        let rawKids = [];
         if (currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE') {
-            kids = await db.children.toArray();
+            rawKids = await db.children.toArray();
         } else if (currentSyncKey === 'STAGE_ADMIN') {
             if (allowedClasses.length === 0) return [];
-            kids = await db.children.where('syncKey').anyOf(allowedClasses).toArray();
+            rawKids = await db.children.where('syncKey').anyOf(allowedClasses).toArray();
         } else if (currentSyncKey) {
-            kids = await db.children.where('syncKey').equals(currentSyncKey).toArray();
+            rawKids = await db.children.where('syncKey').equals(currentSyncKey).toArray();
         }
         
-        // 🌟 1. Filter out soft-deleted globally
-        kids = kids.filter(c => !c.isDeleted);
-        
-        // 🌟 2. For Master Admins, filter out orphaned kids (syncKey not in active Osras) to match MasterDashboard count exactly
-        if (currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE') {
-            const saved = localStorage.getItem('appSettings');
-            const settings = saved ? JSON.parse(saved) : {};
-            const allValidSyncKeys = (settings.services || []).flatMap(s => s.osras || []).map(o => o.syncKey);
-            kids = kids.filter(c => allValidSyncKeys.includes(c.syncKey));
+        const saved = localStorage.getItem('appSettings');
+        const settings = saved ? JSON.parse(saved) : {};
+        const allValidSyncKeys = new Set((settings.services || []).flatMap(s => s.osras || []).map(o => String(o.syncKey || '').trim()).filter(Boolean));
+
+        const seenIds = new Set();
+        const seenNameByClass = new Set();
+        const dedupedKids = [];
+
+        for (const c of rawKids) {
+            if (!c || c.isDeleted) continue;
+
+            const cSyncKey = String(c.syncKey || '').trim();
+            // Filter out orphan kids for master admin
+            if ((currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE') && allValidSyncKeys.size > 0 && !allValidSyncKeys.has(cSyncKey)) {
+                continue;
+            }
+
+            const cId = String(c.id || '').trim();
+            if (!cId || seenIds.has(cId)) continue;
+
+            const normName = normalizeArabicName(c.name);
+            const nameClassKey = `${cSyncKey}___${normName}`;
+            if (normName && seenNameByClass.has(nameClassKey)) {
+                continue; // duplicate ghost
+            }
+
+            seenIds.add(cId);
+            if (normName) seenNameByClass.add(nameClassKey);
+            dedupedKids.push(c);
         }
-        
-        return kids;
+
+        return dedupedKids;
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [currentSyncKey]);
 
@@ -613,18 +635,27 @@ function KidsManagerView({ childrenData }) {
     const handleImageUpload = async (e) => {
         const file = e.target.files[0];
         if (file) {
-            if (!navigator.onLine) {
-                alert("⚠️ لازم نت عشان ترفع الصورة!");
-                return;
-            }
             setIsCompressingImage(true);
             try {
-                const secure_url = await uploadImageToCloudinary(file, 'auto');
-                setFormChild(prev => ({ ...prev, profilePic: secure_url }));
-                alert("✅ تم رفع الصورة بنجاح!");
+                // If online, try Cloudinary first; if offline or if Cloudinary fails, use compressed Base64
+                if (navigator.onLine) {
+                    try {
+                        const secure_url = await uploadImageToCloudinary(file, 'auto');
+                        setFormChild(prev => ({ ...prev, profilePic: secure_url }));
+                        alert("✅ تم رفع الصورة بنجاح!");
+                        return;
+                    } catch (cloudErr) {
+                        console.warn("Cloudinary upload failed, falling back to local base64:", cloudErr);
+                    }
+                }
+
+                // Offline or fallback: compress to lightweight Base64 data URL
+                const base64Url = await compressImageToBase64(file);
+                setFormChild(prev => ({ ...prev, profilePic: base64Url }));
+                alert("✅ تم حفظ الصورة محلياً بنجاح (وضع أوفلاين)!");
             } catch (err) {
                 console.error(err);
-                alert("❌ فشل رفع الصورة، حاول مرة تانية.");
+                alert("❌ فشل معالجة الصورة، حاول مرة تانية.");
             } finally {
                 setIsCompressingImage(false);
             }

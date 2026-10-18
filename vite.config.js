@@ -36,7 +36,55 @@ export default defineConfig({
         ]
       },
       workbox: {
-        maximumFileSizeToCacheInBytes: 10 * 1024 * 1024 
+        maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,jpg,jpeg,woff2}'],
+        runtimeCaching: [
+          {
+            // Cache remote image CDNs (Cloudinary, Firebase Storage, Google User Content, Avatars)
+            urlPattern: /^https:\/\/(?:res\.cloudinary\.com|firebasestorage\.googleapis\.com|lh3\.googleusercontent\.com|api\.dicebear\.com)/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'remote-images-cache',
+              expiration: {
+                maxEntries: 1000,
+                maxAgeSeconds: 90 * 24 * 60 * 60 // 90 days
+              },
+              cacheableResponse: {
+                statuses: [0, 200]
+              }
+            }
+          },
+          {
+            // Cache local and static images
+            urlPattern: /\.(?:png|jpg|jpeg|svg|gif|webp|ico)$/i,
+            handler: 'StaleWhileRevalidate',
+            options: {
+              cacheName: 'static-images-cache',
+              expiration: {
+                maxEntries: 300,
+                maxAgeSeconds: 60 * 24 * 60 * 60 // 60 days
+              },
+              cacheableResponse: {
+                statuses: [0, 200]
+              }
+            }
+          },
+          {
+            // Cache Google Fonts stylesheets and webfonts
+            urlPattern: /^https:\/\/fonts\.(?:googleapis|gstatic)\.com\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'google-fonts-cache',
+              expiration: {
+                maxEntries: 50,
+                maxAgeSeconds: 365 * 24 * 60 * 60 // 1 year
+              },
+              cacheableResponse: {
+                statuses: [0, 200]
+              }
+            }
+          }
+        ]
       }
     })
   ]

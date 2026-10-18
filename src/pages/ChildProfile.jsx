@@ -49,7 +49,7 @@ const ChildProfile = () => {
         alert('تم حفظ تقرير الافتقاد في ملف المخدوم بنجاح! ✅');
     };
 
-    if (!child) return <div className="text-center p-10 font-bold text-slate-500 animate-pulse">جاري تحميل ملف المخدوم...</div>;
+    if (!child || child.isDeleted) return <div className="text-center p-10 font-bold text-slate-500">المخدوم غير موجود أو تم حذفه.</div>;
 
     const isGirl = child.gender === 'بنت';
     const themeBg = isGirl ? 'bg-pink-100' : 'bg-blue-100';
