@@ -7,6 +7,7 @@ import { db } from '../db/database';
 import { Search, Church, BookOpen, CheckCheck, X, MessageCircleWarning, History, UserMinus, UserCheck, Calendar, Music } from 'lucide-react';
 import useAutoSync from '../hooks/useAutoSync';
 import BottomNav from '../components/BottomNav';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function Attendance() {
     const { triggerAutoSync } = useAutoSync();
@@ -55,7 +56,7 @@ export default function Attendance() {
     const attendanceRecords = useLiveQuery(() => db.attendance.where('date').equals(selectedDate).toArray(), [selectedDate]);
 
     const getAttendanceStatus = (childId, type) => {
-        const record = attendanceRecords?.find(a => a.childId === childId && a.type === type && !a.isDeleted);
+        const record = attendanceRecords?.find(a => String(a.childId) === String(childId) && a.type === type && !a.isDeleted);
         return record ? (record.status || 'present') : null;
     };
 
@@ -86,9 +87,9 @@ export default function Attendance() {
         return true;
     }) || [];
 
-    const liturgyCount = attendanceRecords?.filter(a => a.type === 'liturgy' && !a.isDeleted && filteredChildren.some(c => c.id === a.childId)).length || 0;
-    const serviceCount = attendanceRecords?.filter(a => a.type === 'service' && !a.isDeleted && filteredChildren.some(c => c.id === a.childId)).length || 0;
-    const tasbehaCount = attendanceRecords?.filter(a => a.type === 'tasbeha' && !a.isDeleted && filteredChildren.some(c => c.id === a.childId)).length || 0;
+    const liturgyCount = attendanceRecords?.filter(a => a.type === 'liturgy' && !a.isDeleted && filteredChildren.some(c => String(c.id) === String(a.childId))).length || 0;
+    const serviceCount = attendanceRecords?.filter(a => a.type === 'service' && !a.isDeleted && filteredChildren.some(c => String(c.id) === String(a.childId))).length || 0;
+    const tasbehaCount = attendanceRecords?.filter(a => a.type === 'tasbeha' && !a.isDeleted && filteredChildren.some(c => String(c.id) === String(a.childId))).length || 0;
 
     const getReportData = () => {
         let list = [];
@@ -115,10 +116,13 @@ export default function Attendance() {
     const setAttendanceStatus = async (child, type, status) => {
         try {
             const now = new Date().toISOString();
-            const currentSyncKey = localStorage.getItem('currentSyncKey');
+            const rawSyncKey = localStorage.getItem('currentSyncKey');
+            const syncKeyToUse = (rawSyncKey && rawSyncKey !== 'MASTER_ACCESS' && rawSyncKey !== 'ADMIN_MODE') 
+                ? rawSyncKey 
+                : (child.syncKey || rawSyncKey);
 
             const records = await db.attendance.where('date').equals(selectedDate).toArray();
-            const activeRecords = records.filter(a => a.childId === child.id && !a.isDeleted);
+            const activeRecords = records.filter(a => String(a.childId) === String(child.id) && !a.isDeleted);
             const currentRecord = activeRecords.find(r => r.type === type);
             
             const updates = { isDirty: true, updatedAt: now };
@@ -147,7 +151,7 @@ export default function Attendance() {
                     childId: child.id, 
                     type: type, 
                     status: status,
-                    syncKey: currentSyncKey, 
+                    syncKey: syncKeyToUse, 
                     isDirty: true, 
                     updatedAt: now, 
                     isDeleted: false 
@@ -267,7 +271,7 @@ export default function Attendance() {
                     {filteredChildren.map(child => (
                         <div key={child.id} className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 flex flex-col gap-4 hover:shadow-md transition-shadow">
                             <div className="flex items-center gap-3">
-                                <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center text-xl overflow-hidden ring-2 ring-slate-50">{child.profilePic ? <img src={child.profilePic} className="object-cover w-full h-full" /> : (child.gender === 'بنت' ? '👧' : '👦')}</div>
+                                <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center text-xl overflow-hidden ring-2 ring-slate-50">{child.profilePic ? <img src={child.profilePic} alt={child.name || ''} onError={handleImageError} className="object-cover w-full h-full" /> : (child.gender === 'بنت' ? '👧' : '👦')}</div>
                                 <div>
                                     <h3 className="font-black text-slate-800 text-sm">{child.name || 'بدون اسم'}</h3>
                                     <p className={`text-[10px] px-2 py-0.5 rounded mt-1 w-fit font-bold ${child.streak > 0 ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>الاستريك: {child.streak || 0}</p>

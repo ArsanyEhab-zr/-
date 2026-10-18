@@ -8,6 +8,7 @@ import {
     ArrowRight, Printer, Users, Search, Filter,
     QrCode, CreditCard, ChevronDown, Download
 } from 'lucide-react';
+import { handleImageError } from '../utils/imageUtils';
 
 // ─────────────────────────────────────────────
 // 🎴 QR ID Card Generator
@@ -321,6 +322,7 @@ function IdCard({ child, khedmaName, osraName, compact = false, forPrint = false
                         <img
                             src={child.profilePic}
                             alt={child.name}
+                            onError={handleImageError}
                             style={{
                                 width: compact ? '32px' : '44px',
                                 height: compact ? '32px' : '44px',
@@ -394,6 +396,7 @@ function IdCard({ child, khedmaName, osraName, compact = false, forPrint = false
                     <img
                         src={child.profilePic}
                         alt={child.name}
+                        onError={handleImageError}
                         className={`rounded-full object-cover border-2 border-slate-200 ${compact ? 'w-10 h-10' : 'w-14 h-14'}`}
                     />
                 ) : (

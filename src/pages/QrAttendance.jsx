@@ -89,11 +89,11 @@ export default function QrAttendance() {
             const alreadyRecordedSet = new Set(
                 existingActive
                     .filter(r => r.type === type)
-                    .map(r => r.childId)
+                    .map(r => String(r.childId))
             );
 
             // Filter out children already recorded for this date+type
-            const newChildIds = childIds.filter(id => !alreadyRecordedSet.has(id));
+            const newChildIds = childIds.filter(id => !alreadyRecordedSet.has(String(id)));
 
             if (newChildIds.length === 0) {
                 setSaveResult({
@@ -108,19 +108,23 @@ export default function QrAttendance() {
             // ─── Atomic Transaction: Insert Attendance + Update Children ───
             await db.transaction('rw', db.attendance, db.children, async () => {
                 for (const childId of newChildIds) {
+                    const child = await db.children.get(childId);
+                    const syncKeyToUse = (currentSyncKey && currentSyncKey !== 'MASTER_ACCESS' && currentSyncKey !== 'ADMIN_MODE')
+                        ? currentSyncKey
+                        : (child?.syncKey || currentSyncKey || '');
+
                     // 1. Insert attendance record
                     await db.attendance.add({
                         date,
                         childId,
                         type,
-                        syncKey: currentSyncKey,
+                        syncKey: syncKeyToUse,
                         isDirty: true,
                         updatedAt: now,
                         isDeleted: false,
                     });
 
                     // 2. Update child record (streak + last_liturgy/last_service/last_tasbeha)
-                    const child = await db.children.get(childId);
                     if (child && !child.isDeleted) {
                         const field = type === 'liturgy' ? 'last_liturgy' : type === 'tasbeha' ? 'last_tasbeha' : 'last_service';
                         const updates = {
@@ -134,7 +138,7 @@ export default function QrAttendance() {
                         }
 
                         // Increment streak only if this is the child's first active attendance for this date
-                        const childExistingForDate = existingActive.filter(r => r.childId === childId);
+                        const childExistingForDate = existingActive.filter(r => String(r.childId) === String(childId));
                         if (childExistingForDate.length === 0) {
                             updates.streak = (child.streak || 0) + 1;
                         }

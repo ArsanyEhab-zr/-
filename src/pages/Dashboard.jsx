@@ -21,7 +21,7 @@ import ExcelImporter from '../components/ExcelImporter';
 import { generateChildId } from '../utils/idGenerator';
 import { safePurgeLocalChild } from '../db/sync';
 import { normalizeArabicName } from '../utils/nameUtils';
-import { compressImageToBase64 } from '../utils/imageUtils';
+import { compressImageToBase64, handleImageError } from '../utils/imageUtils';
 
 const getSettings = () => {
     const defaults = {
@@ -185,7 +185,7 @@ export default function Dashboard() {
                         )}
                         <div className="flex items-center gap-3">
                             {appSettings.osraLogo ? (
-                                <img src={appSettings.osraLogo} width="40" height="40" loading="eager" fetchpriority="high" className="w-10 h-10 rounded-full object-contain p-1 border-2 border-slate-700 bg-transparent" alt="لوجو الأسرة" />
+                                <img src={appSettings.osraLogo} width="40" height="40" loading="eager" fetchpriority="high" onError={handleImageError} className="w-10 h-10 rounded-full object-contain p-1 border-2 border-slate-700 bg-transparent" alt="لوجو الأسرة" />
                             ) : (
                                 <DatabaseBackup className="text-indigo-400" size={24} />
                             )}
@@ -706,7 +706,11 @@ function KidsManagerView({ childrenData }) {
 
         const now = new Date().toISOString();
         const currentSyncKey = localStorage.getItem('currentSyncKey');
-        const childDataToSave = { ...formChild, birthMonth: bMonth, isDirty: true, updatedAt: now, isDeleted: false, syncKey: currentSyncKey };
+        const targetSyncKey = (editingChild?.syncKey && editingChild.syncKey !== 'MASTER_ACCESS' && editingChild.syncKey !== 'ADMIN_MODE')
+            ? editingChild.syncKey
+            : ((currentSyncKey && currentSyncKey !== 'MASTER_ACCESS' && currentSyncKey !== 'ADMIN_MODE') ? currentSyncKey : (formChild.syncKey || ''));
+
+        const childDataToSave = { ...formChild, birthMonth: bMonth, isDirty: true, updatedAt: now, isDeleted: false, syncKey: targetSyncKey };
 
         if (editingChild) {
             delete childDataToSave.id; // Strictly ensure ID cannot be updated
@@ -796,7 +800,7 @@ function KidsManagerView({ childrenData }) {
                                 {isCompressingImage ? (
                                     <div className="flex flex-col items-center text-indigo-500"><Loader2 className="animate-spin mb-1" size={28} /><span className="text-[10px] font-black">جاري الضغط</span></div>
                                 ) : formChild.profilePic ? (
-                                    <img src={formChild.profilePic} className="w-full h-full object-cover" alt="Profile" />
+                                    <img src={formChild.profilePic} onError={handleImageError} className="w-full h-full object-cover" alt="Profile" />
                                 ) : (
                                     <Camera className="text-slate-400 group-hover:text-indigo-500 transition-colors" size={36} />
                                 )}
@@ -952,7 +956,7 @@ function KidsManagerView({ childrenData }) {
                             <div className="flex justify-between items-start">
                                 <div className="flex items-center gap-3">
                                     <div className="relative w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center text-xl overflow-hidden shadow-inner">
-                                        {child.profilePic ? <img src={child.profilePic} width="48" height="48" loading="lazy" className="w-full h-full object-cover" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
+                                        {child.profilePic ? <img src={child.profilePic} width="48" height="48" loading="lazy" onError={handleImageError} className="w-full h-full object-cover" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
 
                                     </div>
                                     <div>

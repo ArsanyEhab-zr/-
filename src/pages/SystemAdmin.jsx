@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { uploadImageToCloudinary } from '../utils/cloudinary';
+import { compressImageToBase64, handleImageError } from '../utils/imageUtils';
 import {
     ShieldAlert, Key, Church, ImagePlus, Lock,
     Trash2, Save, Users, UserPlus, ArrowRight,
@@ -264,11 +265,28 @@ export default function SystemAdmin() {
     const handleImageUpload = async (e, type, sId, oId = null) => {
         const file = e.target.files[0];
         if (!file) return;
-        if (!navigator.onLine) return alert("لازم نت عشان ترفع الصورة!");
+
+        if (!navigator.onLine) {
+            try {
+                const base64Url = await compressImageToBase64(file);
+                if (type === 'service') handleUpdateService(sId, 'logo', base64Url);
+                if (type === 'osra') handleUpdateOsra(sId, oId, 'logo', base64Url);
+                alert("✅ تم حفظ الصورة محلياً بنجاح (وضع أوفلاين)!");
+                return;
+            } catch (err) {
+                return alert("❌ فشل معالجة الصورة أوفلاين");
+            }
+        }
 
         setIsUploadingImage(true);
         try {
-            const url = await uploadImageToCloudinary(file, 'auto');
+            let url;
+            try {
+                url = await uploadImageToCloudinary(file, 'auto');
+            } catch (cloudErr) {
+                console.warn("Cloudinary upload failed, falling back to base64:", cloudErr);
+                url = await compressImageToBase64(file);
+            }
             if (type === 'service') handleUpdateService(sId, 'logo', url);
             if (type === 'osra') handleUpdateOsra(sId, oId, 'logo', url);
         } catch (err) {
@@ -498,7 +516,7 @@ export default function SystemAdmin() {
                                             <div key={request.id || Math.random()} className="bg-white p-4 rounded-2xl border border-amber-100 flex flex-col md:flex-row items-center justify-between gap-4 shadow-sm">
                                                 <div className="flex items-center gap-4 flex-1">
                                                     {request?.profileImage ? (
-                                                        <img src={request.profileImage} alt={request?.name || 'صورة الخادم'} className="w-14 h-14 rounded-full object-cover border border-amber-200" />
+                                                        <img src={request.profileImage} alt={request?.name || 'صورة الخادم'} onError={handleImageError} className="w-14 h-14 rounded-full object-cover border border-amber-200" />
                                                     ) : (
                                                         <div className="w-14 h-14 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 font-bold text-xl">
                                                             {request?.name ? request.name.charAt(0) : <UserCircle size={24} />}
@@ -556,7 +574,7 @@ export default function SystemAdmin() {
 
                                     <div className="flex flex-col md:flex-row gap-4 mb-6 pr-4">
                                         <div className="w-20 h-20 rounded-2xl bg-white border-2 border-dashed border-slate-300 flex items-center justify-center overflow-hidden shrink-0 relative group cursor-pointer">
-                                            {service.logo ? <img src={service.logo} className="w-full h-full object-cover" /> : <Church className="text-slate-400" size={28} />}
+                                            {service.logo ? <img src={service.logo} onError={handleImageError} className="w-full h-full object-cover" alt="لوجو الخدمة" /> : <Church className="text-slate-400" size={28} />}
                                             {isSuperAdmin && (
                                                 <>
                                                     <div className="absolute inset-0 bg-black/50 hidden group-hover:flex items-center justify-center text-white text-[10px] font-bold text-center">تغيير</div>
@@ -600,7 +618,7 @@ export default function SystemAdmin() {
 
                                                     <div className="flex items-start gap-3 mb-3">
                                                         <div className="w-12 h-12 rounded-xl bg-white border border-slate-200 flex items-center justify-center overflow-hidden shrink-0 relative cursor-pointer">
-                                                            {osra.logo ? <img src={osra.logo} width="48" height="48" loading="lazy" className="w-full h-full object-cover" alt="لوجو الأسرة" /> : <ImagePlus className="text-slate-400" size={16} />}
+                                                            {osra.logo ? <img src={osra.logo} width="48" height="48" loading="lazy" onError={handleImageError} className="w-full h-full object-cover" alt="لوجو الأسرة" /> : <ImagePlus className="text-slate-400" size={16} />}
                                                             <input type="file" accept="image/*" onChange={(e) => handleImageUpload(e, 'osra', service.id, osra.id)} className="absolute inset-0 opacity-0 cursor-pointer" />
                                                             {isUploadingImage && (
                                                                 <div className="absolute inset-0 bg-white/80 flex items-center justify-center">

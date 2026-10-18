@@ -9,12 +9,23 @@ export default function ExcelExporter() {
     const handleExport = async () => {
         setIsExporting(true);
         try {
-            // 1. 🔐 جلب أطفال الأسرة الحالية بس من قاعدة البيانات
+            // 1. 🔐 جلب أطفال الأسرة الحالية بس من قاعدة البيانات مع استبعاد المحذوفين
             const currentSyncKey = String(localStorage.getItem('currentSyncKey') || '');
             const isMaster = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE';
-            const children = isMaster
-                ? await db.children.toArray()
-                : (!currentSyncKey ? [] : await db.children.where('syncKey').equals(currentSyncKey).toArray());
+            const currentServantObj = JSON.parse(localStorage.getItem('currentServant') || '{}');
+            const allowedClasses = currentServantObj.allowedClasses || [];
+            const isStageAdmin = currentSyncKey === 'STAGE_ADMIN' || currentServantObj.role === 'أمين مرحلة';
+
+            let rawKids = [];
+            if (isMaster) {
+                rawKids = await db.children.toArray();
+            } else if (isStageAdmin) {
+                rawKids = allowedClasses.length > 0 ? await db.children.where('syncKey').anyOf(allowedClasses).toArray() : [];
+            } else if (currentSyncKey) {
+                rawKids = await db.children.where('syncKey').equals(currentSyncKey).toArray();
+            }
+
+            const children = rawKids.filter(c => !c.isDeleted);
 
             if (children.length === 0) {
                 alert("لا يوجد بيانات لتصديرها!");
@@ -44,6 +55,7 @@ export default function ExcelExporter() {
                 return {
                     "كود المخدوم": child.id || "لم يتم إنشاء كود",
                     "الاسم": child.name || "",
+                    "كود الفصل": child.syncKey || "",
                     "النوع": child.gender || "",
                     "رابط الصورة المرفوعة": child.profilePic ? child.profilePic : "لا توجد صورة",
                     "الخدمة التابع لها": khedmaName,

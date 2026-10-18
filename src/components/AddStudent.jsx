@@ -17,7 +17,10 @@ const AddChild = () => {
     };
 
     const saveChild = async () => {
-        const syncKey = localStorage.getItem('currentSyncKey');
+        const rawSyncKey = localStorage.getItem('currentSyncKey');
+        const syncKey = (rawSyncKey && rawSyncKey !== 'MASTER_ACCESS' && rawSyncKey !== 'ADMIN_MODE' && rawSyncKey !== 'STAGE_ADMIN')
+            ? rawSyncKey
+            : (formData.syncKey || '');
         const now = new Date().toISOString();
         const id = ensureCleanChildId(formData.id, formData.gender);
         await db.children.add({

@@ -3,6 +3,7 @@ import { Printer, ArrowRight, Calendar, Filter, Loader2, Users, LayoutList } fro
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, collection, getDocs, query, where } from 'firebase/firestore';
 import { firestore } from '../db/firebase';
+import { buildCanonicalServantIndex } from '../utils/servantUtils';
 
 export default function ServantsMonthlyReport() {
     const navigate = useNavigate();
@@ -36,6 +37,17 @@ export default function ServantsMonthlyReport() {
     const [reportData, setReportData] = useState([]);
     const [uniqueOsras, setUniqueOsras] = useState([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [refreshKey, setRefreshKey] = useState(0);
+
+    useEffect(() => {
+        const handleServantUpdate = () => setRefreshKey(k => k + 1);
+        window.addEventListener('servant-updated', handleServantUpdate);
+        window.addEventListener('storage', handleServantUpdate);
+        return () => {
+            window.removeEventListener('servant-updated', handleServantUpdate);
+            window.removeEventListener('storage', handleServantUpdate);
+        };
+    }, []);
 
     useEffect(() => {
         const fetchReport = async () => {
@@ -48,13 +60,13 @@ export default function ServantsMonthlyReport() {
                     baseServants = configSnap.data().servants || [];
                 }
                 const servantsSnap = await getDocs(collection(firestore, "servants"));
-                servantsSnap.forEach(doc => {
-                    if (!baseServants.find(s => s.phone === doc.data().phone)) {
-                        baseServants.push({ ...doc.data(), uid: doc.id });
+                servantsSnap.forEach(docSnap => {
+                    if (!baseServants.find(s => s.phone === docSnap.data().phone)) {
+                        baseServants.push({ ...docSnap.data(), uid: docSnap.id });
                     }
                 });
 
-                // 🚨 CRITICAL BUG FIX: Exclude deleted servants
+                // Exclude deleted servants
                 try {
                     const appSettingsStr = localStorage.getItem('appSettings');
                     if (appSettingsStr) {
@@ -71,10 +83,13 @@ export default function ServantsMonthlyReport() {
                     console.error("Error filtering active servants:", err);
                 }
 
+                // 👑 Build canonical servant index to resolve any UID / Phone / Name variation
+                const { canonicalList, resolveServant } = buildCanonicalServantIndex(baseServants);
+
                 // Extract Osras for dropdown
                 const osras = new Set();
-                baseServants.forEach(s => {
-                    s.osraName = s.osraName || s.syncKey || "غير محدد";
+                canonicalList.forEach(s => {
+                    s.osraName = s.osraName || s.assignedOsra || s.syncKey || "غير محدد";
                     if (s.osraName !== "MASTER_ACCESS" && s.osraName !== "ADMIN_MODE") {
                         osras.add(s.osraName);
                     }
@@ -82,7 +97,7 @@ export default function ServantsMonthlyReport() {
                 setUniqueOsras(Array.from(osras));
 
                 // Filter servants by Osra
-                let filteredServants = baseServants;
+                let filteredServants = canonicalList;
                 if (osraFilter !== "الكل") {
                     filteredServants = filteredServants.filter(s => s.osraName === osraFilter);
                 }
@@ -103,9 +118,12 @@ export default function ServantsMonthlyReport() {
                 const attendanceByServant = {};
                 attendanceSnap.forEach(d => {
                     const data = d.data();
-                    const sId = data.uid || data.phone;
-                    if (!attendanceByServant[sId]) attendanceByServant[sId] = [];
-                    attendanceByServant[sId].push(data);
+                    const matchedServant = resolveServant(data);
+                    if (matchedServant) {
+                        const sId = matchedServant.canonicalId;
+                        if (!attendanceByServant[sId]) attendanceByServant[sId] = [];
+                        attendanceByServant[sId].push(data);
+                    }
                 });
 
                 // 3. Aggregate data
@@ -113,7 +131,7 @@ export default function ServantsMonthlyReport() {
                 const totalWeeks = allWeekDates.length > 0 ? allWeekDates.length : (viewMode === 'monthly' ? 4 : 52);
 
                 const aggregatedData = filteredServants.map((s, idx) => {
-                    const sId = s.uid || s.phone;
+                    const sId = s.canonicalId;
                     const records = attendanceByServant[sId] || [];
                     records.sort((a, b) => a.weekDate.localeCompare(b.weekDate)); // Sort oldest to newest
 

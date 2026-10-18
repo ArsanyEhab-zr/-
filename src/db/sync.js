@@ -745,16 +745,25 @@ const _syncDataWithCloud = async () => {
             }
         }
 
-        // 🛡️ Phase 3: Purge deleted local attendance records
+        // 🛡️ Phase 3: Purge deleted local attendance records & cloud-deleted attendance
+        const syncKeySet = new Set(classesToSync.map(String));
         for (const [key, records] of localAttByKey.entries()) {
             for (const rec of records) {
                 if (rec.isDeleted) {
                     try { await db.attendance.delete(rec.id); } catch (_) {}
+                    continue;
+                }
+                // Purge ghost attendance if record was deleted in the cloud, is not dirty, and belongs to a synced class
+                const recSyncKey = String(rec.syncKey || '');
+                if (!rec.isDirty && !pushedAttendanceIds.has(key) && !cloudAttendanceKeys.has(key)) {
+                    if (syncKeySet.has(recSyncKey) || recSyncKey === String(currentSyncKey)) {
+                        try { await db.attendance.delete(rec.id); } catch (_) {}
+                    }
                 }
             }
         }
 
-        // 2e. سحب الأحداث (Events Pull)
+        // 2e. سحب الأحداث (Events Pull & Reconciliation)
         let cloudEvents = [];
         if (isAdmin) {
             const eventsSnapshot = await getDocs(collectionGroup(firestore, 'events'));
@@ -777,6 +786,7 @@ const _syncDataWithCloud = async () => {
 
         const localEvList = await db.events.toArray();
         const localEventsMap = new Map(localEvList.map(e => [e.id, e]));
+        const cloudEventIds = new Set(cloudEvents.map(e => String(e.id)));
 
         for (const cloudEvent of cloudEvents) {
             if (pushedEventsIds.has(cloudEvent.id)) continue;
@@ -801,7 +811,17 @@ const _syncDataWithCloud = async () => {
             }
         }
 
-        // 2f. سحب الامتحانات والدرجات (Exams & Grades Pull)
+        // Purge local events deleted in the cloud
+        for (const localEvent of localEvList) {
+            if (!localEvent.isDirty && !pushedEventsIds.has(localEvent.id) && !cloudEventIds.has(String(localEvent.id))) {
+                const evSyncKey = String(localEvent.syncKey || '');
+                if (syncKeySet.has(evSyncKey) || evSyncKey === 'global' || evSyncKey === String(currentSyncKey)) {
+                    try { await db.events.delete(localEvent.id); } catch (_) {}
+                }
+            }
+        }
+
+        // 2f. سحب ومطابقة الامتحانات والدرجات (Exams & Grades Pull & Reconciliation)
         let cloudExamsList = [];
         if (isAdmin) {
             const examsSnapshot = await getDocs(collectionGroup(firestore, 'exams'));
@@ -819,6 +839,14 @@ const _syncDataWithCloud = async () => {
 
         const freshLocalExams = await db.exams.toArray();
         const localExamsMap = new Map(freshLocalExams.map(e => [e.firebaseId, e]));
+        const cloudExamFirebaseIds = new Set(cloudExamsList.map(e => String(e.firebaseId)));
+
+        // Preload all local grades into a memory Map to eliminate O(N^2) DB queries in the loop
+        const freshLocalGrades = await db.grades.toArray();
+        const localGradesMap = new Map(); // `${examId}_${cleanChildId}` -> grade record
+        for (const g of freshLocalGrades) {
+            localGradesMap.set(`${g.examId}_${String(g.childId)}`, g);
+        }
 
         for (const cloudExam of cloudExamsList) {
             if (pushedExamIds.has(cloudExam.firebaseId)) continue;
@@ -847,10 +875,12 @@ const _syncDataWithCloud = async () => {
                 }
             }
 
-            // سحب درجات هذا الامتحان
+            // سحب ومطابقة درجات هذا الامتحان
             try {
                 const gradesColRef = collection(firestore, 'Osras', String(syncKeyToSave), 'exams', cloudExam.firebaseId, 'grades');
                 const gradesSnapshot = await getDocs(gradesColRef);
+                const cloudChildIdsForExam = new Set();
+
                 for (const gradeDoc of (gradesSnapshot?.docs || [])) {
                     if (gradeDoc.id === '_placeholder') continue;
                     const rawData = gradeDoc.data();
@@ -858,13 +888,13 @@ const _syncDataWithCloud = async () => {
                     const gradeData = rawData.payload ? decryptData(rawData.payload) : rawData;
                     if (!gradeData || !gradeData.childId) continue;
 
-                    const gradeKey = `${cloudExam.firebaseId}_${gradeData.childId}`;
+                    const cleanChildId = String(gradeData.childId);
+                    cloudChildIdsForExam.add(cleanChildId);
+
+                    const gradeKey = `${cloudExam.firebaseId}_${cleanChildId}`;
                     if (pushedGradeKeys.has(gradeKey)) continue;
 
-                    const localGradesFresh = await db.grades.toArray();
-                    const localGradeMatch = localGradesFresh.find(
-                        g => g.examId === cloudExam.firebaseId && String(g.childId) === String(gradeData.childId)
-                    );
+                    const localGradeMatch = localGradesMap.get(gradeKey);
 
                     const gradeToSave = {
                         childId: gradeData.childId,
@@ -880,17 +910,46 @@ const _syncDataWithCloud = async () => {
                     };
 
                     if (!localGradeMatch) {
-                        pullLog.gradesAdded.push(`${cloudExam.examName}/${gradeData.childId}`);
-                        await db.grades.add(gradeToSave);
+                        pullLog.gradesAdded.push(`${cloudExam.examName}/${cleanChildId}`);
+                        const newId = await db.grades.add(gradeToSave);
+                        localGradesMap.set(gradeKey, { ...gradeToSave, id: newId });
                     } else {
                         const cloudUpdated = gradeData.updatedAt || '1970-01-01T00:00:00.000Z';
                         if (cloudUpdated > lastSyncTime && !localGradeMatch.isDirty) {
-                            pullLog.gradesUpdated.push(`${cloudExam.examName}/${gradeData.childId}`);
+                            pullLog.gradesUpdated.push(`${cloudExam.examName}/${cleanChildId}`);
                             await db.grades.update(localGradeMatch.id, gradeToSave);
+                            localGradesMap.set(gradeKey, { ...gradeToSave, id: localGradeMatch.id });
+                        }
+                    }
+                }
+
+                // Purge local grades for this exam deleted from cloud
+                for (const [key, localGrade] of localGradesMap.entries()) {
+                    if (localGrade.examId === cloudExam.firebaseId && !localGrade.isDirty) {
+                        const cleanChildId = String(localGrade.childId);
+                        const gradeKey = `${cloudExam.firebaseId}_${cleanChildId}`;
+                        if (!cloudChildIdsForExam.has(cleanChildId) && !pushedGradeKeys.has(gradeKey)) {
+                            try {
+                                await db.grades.delete(localGrade.id);
+                                localGradesMap.delete(key);
+                            } catch (_) {}
                         }
                     }
                 }
             } catch (_e) { /* ignore */ }
+        }
+
+        // Purge local exams deleted in the cloud
+        for (const localExam of freshLocalExams) {
+            if (!localExam.isDirty && !pushedExamIds.has(localExam.firebaseId) && !cloudExamFirebaseIds.has(String(localExam.firebaseId))) {
+                const exSyncKey = String(localExam.syncKey || '');
+                if (syncKeySet.has(exSyncKey) || exSyncKey === String(currentSyncKey)) {
+                    try {
+                        await db.exams.delete(localExam.id);
+                        await db.grades.where('examId').equals(localExam.firebaseId).delete();
+                    } catch (_) {}
+                }
+            }
         }
 
         // 🕐 تحديث آخر وقت مزامنة

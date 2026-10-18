@@ -1,6 +1,6 @@
 /* eslint-disable react-hooks/rules-of-hooks */
 /* eslint-disable no-unused-vars */
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
@@ -13,6 +13,7 @@ import { LocalNotifications } from '@capacitor/local-notifications';
 import { Network } from '@capacitor/network';
 import { calculateExactAge } from '../utils/dateUtils';
 import { TENANT_CONFIG } from '../config/tenantConfig';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function Home() {
     const navigate = useNavigate();
@@ -41,7 +42,7 @@ export default function Home() {
     // 🔥 Hydration state for Auth/Local Data
     const [isHydrating, setIsHydrating] = useState(true);
 
-    const [authState, setAuthState] = useState(() => {
+    const readAuthState = () => {
         const syncKey = String(localStorage.getItem('currentSyncKey') || '');
         let servant = {};
         try { servant = JSON.parse(localStorage.getItem('currentServant') || '{}'); } catch (e) {}
@@ -50,8 +51,9 @@ export default function Home() {
         const leadership = master || servant.role === 'كاهن' || servant.role === 'أمين أسرة' || servant.role === 'أدمن مساعد' || servant.role === 'أمين مرحلة';
         
         return { currentSyncKey: syncKey, currentServant: servant, isMaster: master, isLeadership: leadership };
-    });
+    };
 
+    const [authState, setAuthState] = useState(readAuthState);
     const { currentSyncKey, currentServant, isMaster, isLeadership } = authState;
 
     // 🌟 جلب إعدادات الكنيسة والخدمة
@@ -87,17 +89,10 @@ export default function Home() {
         }).count();
     }, []);
 
-    useEffect(() => {
-        // 🌟 1. تظبيط التواريخ
-        const date = new Date();
-        setGregorianDate(date.toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }));
-        try {
-            setCopticDate(new Intl.DateTimeFormat('ar-EG-u-ca-coptic', { day: 'numeric', month: 'long', year: 'numeric' }).format(date));
-        } catch (e) {
-            setCopticDate("التقويم القبطي");
-        }
+    const loadSettings = useCallback((auth) => {
+        const currentKey = auth?.currentSyncKey ?? currentSyncKey;
+        const masterMode = auth?.isMaster ?? isMaster;
 
-        // 🌟 2. قراءة الداتا بذكاء من الـ appSettings (الاسم، اللوجو، المنهج، الـ PDF)
         const savedSettings = localStorage.getItem('appSettings');
         if (savedSettings) {
             try {
@@ -110,21 +105,19 @@ export default function Home() {
                 let matchedPdf = "";
                 let matchedLessons = [];
 
-                if (isMaster) {
+                if (masterMode) {
                     finalKhedmaName = parsed.services?.[0]?.name || parsed.khedmaName || "الخدمة المركزية";
                     finalKhedmaLogo = parsed.services?.[0]?.logo || parsed.khedmaLogo || "";
                     finalOsraName = "كل الأسر (صلاحية كاملة)";
                 } else if (parsed.services && Array.isArray(parsed.services)) {
-                    // البحث عن أسرة الخادم
                     for (const service of parsed.services) {
-                        const foundOsra = (service.osras || []).find(o => String(o.syncKey).trim() === String(currentSyncKey).trim());
+                        const foundOsra = (service.osras || []).find(o => String(o.syncKey).trim() === String(currentKey).trim());
                         if (foundOsra) {
                             finalKhedmaName = service.name;
                             finalKhedmaLogo = service.logo;
                             finalOsraName = foundOsra.name;
                             finalOsraLogo = foundOsra.logo;
 
-                            // 🌟 السحر هنا: بناخد المنهج من جوه الأسرة نفسها!
                             matchedPdf = foundOsra.pdfUrl || "";
                             matchedLessons = foundOsra.lessons || [];
                             break;
@@ -132,7 +125,6 @@ export default function Home() {
                     }
                 }
 
-                // 🌟 3. عرض البيانات في الشاشة
                 setAppSettings({ khedmaName: finalKhedmaName, khedmaLogo: finalKhedmaLogo, osraName: finalOsraName, osraLogo: finalOsraLogo });
 
                 setCurriculumPdfUrl(matchedPdf);
@@ -143,20 +135,16 @@ export default function Home() {
                 }
 
                 if (matchedLessons.length > 0) {
-                    // 🔐 فلترة الدروس: إخفاء الدروس اللي تاريخها فات
                     const today = new Date();
                     today.setHours(0, 0, 0, 0);
-                    const todayStr = today.toISOString().split('T')[0];
 
                     const validLessons = matchedLessons.filter(l => {
-                        if (!l.date) return true; // لو مفيش تاريخ، نعرضه
-                        const parsed = new Date(l.date);
-                        if (!isNaN(parsed.getTime())) {
-                            // تاريخ ISO حقيقي — نقارن تاريخياً
-                            parsed.setHours(0, 0, 0, 0);
-                            return parsed >= today;
+                        if (!l.date) return true;
+                        const parsedDate = new Date(l.date);
+                        if (!isNaN(parsedDate.getTime())) {
+                            parsedDate.setHours(0, 0, 0, 0);
+                            return parsedDate >= today;
                         }
-                        // تاريخ نصي قديم (عربي) — نعرضه عشان ميختفيش
                         return true;
                     });
                     const lesson = validLessons.find(l => l.date === targetDate) || validLessons[0];
@@ -164,11 +152,40 @@ export default function Home() {
                 } else {
                     setTodaysLesson(null);
                 }
-
             } catch (e) { console.error("Error reading settings", e); }
         }
+    }, [currentSyncKey, isMaster, targetDate]);
+
+    useEffect(() => {
+        const date = new Date();
+        setGregorianDate(date.toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }));
+        try {
+            setCopticDate(new Intl.DateTimeFormat('ar-EG-u-ca-coptic', { day: 'numeric', month: 'long', year: 'numeric' }).format(date));
+        } catch (e) {
+            setCopticDate("التقويم القبطي");
+        }
+
+        const freshAuth = readAuthState();
+        setAuthState(freshAuth);
+        loadSettings(freshAuth);
         setIsHydrating(false);
-    }, [targetDate, currentSyncKey, isMaster]);
+
+        const handleRealtimeUpdate = () => {
+            const updatedAuth = readAuthState();
+            setAuthState(updatedAuth);
+            loadSettings(updatedAuth);
+        };
+
+        window.addEventListener('servant-updated', handleRealtimeUpdate);
+        window.addEventListener('storage', handleRealtimeUpdate);
+        window.addEventListener('focus', handleRealtimeUpdate);
+
+        return () => {
+            window.removeEventListener('servant-updated', handleRealtimeUpdate);
+            window.removeEventListener('storage', handleRealtimeUpdate);
+            window.removeEventListener('focus', handleRealtimeUpdate);
+        };
+    }, [loadSettings]);
 
 
     useEffect(() => {
@@ -381,7 +398,7 @@ export default function Home() {
                             <div className="relative flex shrink-0">
                                 {!isMaster && (
                                     appSettings.osraLogo || TENANT_CONFIG.DEFAULT_OSRA_LOGO ? (
-                                        <img src={appSettings.osraLogo || TENANT_CONFIG.DEFAULT_OSRA_LOGO} alt="لوجو الأسرة" width="64" height="64" loading="lazy" decoding="async" className="w-16 h-16 rounded-full border-4 border-white shadow-md z-10 bg-slate-100 object-cover" />
+                                        <img src={appSettings.osraLogo || TENANT_CONFIG.DEFAULT_OSRA_LOGO} alt="لوجو الأسرة" width="64" height="64" loading="lazy" decoding="async" onError={handleImageError} className="w-16 h-16 rounded-full border-4 border-white shadow-md z-10 bg-slate-100 object-cover" />
                                     ) : (
                                         <div className="w-16 h-16 rounded-full border-4 border-white shadow-md z-10 bg-indigo-100 flex items-center justify-center text-xl font-black text-indigo-500">
                                             {appSettings.osraName ? appSettings.osraName.charAt(0) : "أ"}
@@ -389,7 +406,7 @@ export default function Home() {
                                     )
                                 )}
                                 {appSettings.khedmaLogo || TENANT_CONFIG.DEFAULT_KHEDMA_LOGO ? (
-                                    <img src={appSettings.khedmaLogo || TENANT_CONFIG.DEFAULT_KHEDMA_LOGO} alt="لوجو الخدمة" width="64" height="64" loading="lazy" decoding="async" className={`w-16 h-16 rounded-full border-4 border-white shadow-md bg-slate-100 object-cover ${!isMaster ? '-mr-6' : ''}`} />
+                                    <img src={appSettings.khedmaLogo || TENANT_CONFIG.DEFAULT_KHEDMA_LOGO} alt="لوجو الخدمة" width="64" height="64" loading="lazy" decoding="async" onError={handleImageError} className={`w-16 h-16 rounded-full border-4 border-white shadow-md bg-slate-100 object-cover ${!isMaster ? '-mr-6' : ''}`} />
                                 ) : (
                                     <div className={`w-16 h-16 rounded-full border-4 border-white shadow-md bg-purple-100 flex items-center justify-center text-xl font-black text-purple-500 ${!isMaster ? '-mr-6' : ''}`}>
                                         {appSettings.khedmaName ? appSettings.khedmaName.charAt(0) : "خ"}
@@ -480,7 +497,7 @@ export default function Home() {
                                 <div key={i} className="bg-gradient-to-br from-indigo-900 to-indigo-950 p-5 rounded-3xl shadow-xl shadow-indigo-900/20 border border-amber-500/20 flex flex-col justify-between hover:scale-[1.02] transition-transform">
                                     <div className="flex items-center gap-4 mb-5">
                                         {osra.logo || TENANT_CONFIG.DEFAULT_OSRA_LOGO ? (
-                                            <img src={osra.logo || TENANT_CONFIG.DEFAULT_OSRA_LOGO} alt={osra.name} className="w-14 h-14 rounded-2xl object-cover bg-white p-1 shadow-sm" />
+                                            <img src={osra.logo || TENANT_CONFIG.DEFAULT_OSRA_LOGO} alt={osra.name} onError={handleImageError} className="w-14 h-14 rounded-2xl object-cover bg-white p-1 shadow-sm" />
                                         ) : (
                                             <div className="w-14 h-14 rounded-2xl bg-white/20 flex items-center justify-center text-xl font-black text-white p-1 shadow-sm border border-white/30">
                                                 {osra.name ? osra.name.charAt(0) : "ف"}

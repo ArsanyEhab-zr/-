@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../db/database';
 import { Gift, MapPin, CheckCircle2, Edit3, Phone } from 'lucide-react';
 import { Link } from 'react-router-dom';
-
 import useAutoSync from '../hooks/useAutoSync';
+import { handleImageError } from '../utils/imageUtils';
 
 const AttendanceCard = ({ child, onEdit }) => {
     const [attendedToday, setAttendedToday] = useState(false);
@@ -21,7 +21,10 @@ const AttendanceCard = ({ child, onEdit }) => {
     }, [child.last_attended, today]);
 
     const toggleAttendance = async () => {
-        const syncKey = localStorage.getItem('currentSyncKey');
+        const rawSyncKey = localStorage.getItem('currentSyncKey');
+        const syncKey = (rawSyncKey && rawSyncKey !== 'MASTER_ACCESS' && rawSyncKey !== 'ADMIN_MODE' && rawSyncKey !== 'STAGE_ADMIN')
+            ? rawSyncKey
+            : (child.syncKey || rawSyncKey);
         const now = new Date().toISOString();
         const type = 'service'; // AttendanceCard always records service attendance
 
@@ -31,7 +34,7 @@ const AttendanceCard = ({ child, onEdit }) => {
                 .where('date').equals(today)
                 .toArray();
             const alreadyExists = existingRecords.find(
-                a => a.childId === child.id && a.type === type && !a.isDeleted
+                a => String(a.childId) === String(child.id) && a.type === type && !a.isDeleted
             );
 
             if (!alreadyExists) {
@@ -70,7 +73,7 @@ const AttendanceCard = ({ child, onEdit }) => {
                 .where('date').equals(today)
                 .toArray();
             const matchingRecord = existingRecords.find(
-                a => a.childId === child.id && a.type === type && !a.isDeleted
+                a => String(a.childId) === String(child.id) && a.type === type && !a.isDeleted
             );
             if (matchingRecord) {
                 await db.attendance.update(matchingRecord.id, { isDeleted: true, isDirty: true, updatedAt: now });
@@ -93,7 +96,7 @@ const AttendanceCard = ({ child, onEdit }) => {
                     <Link to={`/child/${child.id}`}>
                         <div className={`w-12 h-12 rounded-2xl bg-linear-to-br from-${themeColor}-100 to-${themeColor}-50 border border-${themeColor}-200 flex items-center justify-center text-lg font-black text-${themeColor}-600 shadow-inner`}>
                             {child.profilePic ? (
-                                <img src={child.profilePic} alt={child.name} className="w-full h-full rounded-2xl object-cover" />
+                                <img src={child.profilePic} alt={child.name} className="w-full h-full rounded-2xl object-cover" onError={handleImageError} />
                             ) : (
                                 isGirl ? '👧' : '👦'
                             )}

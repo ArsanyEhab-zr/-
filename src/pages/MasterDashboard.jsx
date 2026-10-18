@@ -12,8 +12,9 @@ import ExcelExporter from '../components/ExcelExporter';
 import ServantProfile from '../components/ServantProfile';
 import useAutoSync from '../hooks/useAutoSync';
 import { TENANT_CONFIG } from '../config/tenantConfig';
-import { syncDataWithCloud, reconcileAllClassesWithCloud } from '../db/sync';
+import { syncDataWithCloud, reconcileAllClassesWithCloud, reconcileClassChildren } from '../db/sync';
 import { normalizeArabicName } from '../utils/nameUtils';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function MasterDashboard() {
     const navigate = useNavigate();
@@ -221,11 +222,22 @@ export default function MasterDashboard() {
             }
         };
 
+        const handleServantUpdated = () => {
+            try {
+                const freshSettings = JSON.parse(localStorage.getItem('appSettings') || '{}');
+                setAppSettings(freshSettings);
+            } catch (_) {}
+        };
+
         window.addEventListener('visibilitychange', handleVisibilityOrFocus);
         window.addEventListener('focus', handleVisibilityOrFocus);
+        window.addEventListener('servant-updated', handleServantUpdated);
+        window.addEventListener('storage', handleServantUpdated);
         return () => {
             window.removeEventListener('visibilitychange', handleVisibilityOrFocus);
             window.removeEventListener('focus', handleVisibilityOrFocus);
+            window.removeEventListener('servant-updated', handleServantUpdated);
+            window.removeEventListener('storage', handleServantUpdated);
         };
     }, [hasAccess]);
 
@@ -290,12 +302,13 @@ export default function MasterDashboard() {
             alert('⚠️ فصل المصدر والوجهة متطابقان! اختر فصلًا مختلفًا.');
             return;
         }
-        if (!window.confirm(`هل تريد ترحيل ${transferSelectedIds.size} مخدوم من الفصل المصدر إلى الفصل الجديد؟ هذه العملية ستنقل بياناتهم بالكامل.`)) return;
+        if (!window.confirm(`هل تريد ترحيل ${transferSelectedIds.size} مخدوم من الفصل المصدر إلى الفصل الجديد؟ هذه العملية ستنقل بياناتهم وسجلات حضورهم بالكامل.`)) return;
 
         setIsTransferring(true);
         try {
             const batch = writeBatch(firestore);
             let transferredCount = 0;
+            const now = new Date().toISOString();
 
             for (const childId of transferSelectedIds) {
                 try {
@@ -315,7 +328,7 @@ export default function MasterDashboard() {
 
                     // تحديث الـ syncKey للفصل الجديد
                     decryptedData.syncKey = transferTargetKey;
-                    decryptedData.updatedAt = new Date().toISOString();
+                    decryptedData.updatedAt = now;
 
                     const newPayload = rawData.payload
                         ? { payload: encryptData(decryptedData) }
@@ -329,21 +342,79 @@ export default function MasterDashboard() {
                 }
             }
 
+            // 📅 ترحيل سجلات الغياب المرتبطة بهؤلاء الأطفال في فايربيز
+            try {
+                const attSnap = await getDocs(collection(firestore, 'Osras', transferSourceKey, 'attendance'));
+                const attBatch = writeBatch(firestore);
+                let attTransferredCount = 0;
+
+                for (const docSnap of attSnap.docs) {
+                    const rawAtt = docSnap.data();
+                    const decryptedAtt = rawAtt.payload ? decryptData(rawAtt.payload) : rawAtt;
+                    if (!decryptedAtt || !decryptedAtt.childId) continue;
+
+                    const isMatch = transferSelectedIds.has(String(decryptedAtt.childId)) ||
+                                    transferSelectedIds.has(Number(decryptedAtt.childId)) ||
+                                    (typeof decryptedAtt.childId === 'string' && transferSelectedIds.has(decryptedAtt.childId.trim()));
+
+                    if (isMatch) {
+                        decryptedAtt.syncKey = transferTargetKey;
+                        decryptedAtt.updatedAt = now;
+
+                        const newDocId = `${decryptedAtt.date}_${decryptedAtt.childId}_${decryptedAtt.type || 'service'}`;
+                        const newAttDocRef = doc(firestore, 'Osras', transferTargetKey, 'attendance', newDocId);
+                        const oldAttDocRef = doc(firestore, 'Osras', transferSourceKey, 'attendance', docSnap.id);
+
+                        const newAttPayload = rawAtt.payload ? { payload: encryptData(decryptedAtt) } : decryptedAtt;
+                        attBatch.set(newAttDocRef, newAttPayload);
+                        attBatch.delete(oldAttDocRef);
+                        attTransferredCount++;
+                    }
+                }
+
+                if (attTransferredCount > 0) {
+                    await attBatch.commit();
+                    console.log(`✅ [Transfer] Migrated ${attTransferredCount} attendance records to ${transferTargetKey}`);
+                }
+            } catch (attErr) {
+                console.warn('[Transfer] Attendance transfer warning:', attErr.message);
+            }
+
             if (transferredCount > 0) {
                 await batch.commit();
 
-                // تحديث Dexie محلياً
+                // تحديث Dexie محلياً لجميع السجلات (أطفال، حضور، درجات)
                 for (const childId of transferSelectedIds) {
+                    const strId = String(childId).trim();
+                    const numId = Number(strId);
+
                     try {
-                        await db.children.update(childId, {
-                            syncKey: transferTargetKey,
-                            isDirty: false,
-                            updatedAt: new Date().toISOString()
-                        });
-                    } catch (_e) { /* skip if not found locally */ }
+                        await db.children.where('id').equals(strId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
+                        if (!isNaN(numId) && Number.isFinite(numId)) {
+                            await db.children.where('id').equals(numId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
+                        }
+
+                        await db.attendance.where('childId').equals(strId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
+                        if (!isNaN(numId) && Number.isFinite(numId)) {
+                            await db.attendance.where('childId').equals(numId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
+                        }
+
+                        await db.grades.where('childId').equals(strId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
+                        if (!isNaN(numId) && Number.isFinite(numId)) {
+                            await db.grades.where('childId').equals(numId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
+                        }
+                    } catch (_e) { /* skip if record not in local table */ }
                 }
 
-                alert(`✅ تم ترحيل ${transferredCount} مخدوم بنجاح!`);
+                // 🔄 تشغيل المصالحة الصارمة على الفصلين لمنع تكرار أي سجلات على الإطلاق
+                try {
+                    await reconcileClassChildren(transferSourceKey);
+                    await reconcileClassChildren(transferTargetKey);
+                } catch (recErr) {
+                    console.warn('[Transfer] Post-transfer reconciliation warning:', recErr.message);
+                }
+
+                alert(`✅ تم ترحيل ${transferredCount} مخدوم وبياناتهم بنجاح!`);
                 setTransferSelectedIds(new Set());
                 setTransferSourceKey('');
                 setTransferTargetKey('');
@@ -688,7 +759,7 @@ export default function MasterDashboard() {
                                     >
                                         <div className="w-16 h-16 rounded-full bg-slate-100 border-4 border-slate-50 overflow-hidden shrink-0 shadow-inner group-hover:border-amber-100 transition-colors">
                                             {osra.logo ? (
-                                                <img src={osra.logo} width="64" height="64" loading="lazy" alt="لوجو الأسرة" className="w-full h-full object-cover" />
+                                                <img src={osra.logo} width="64" height="64" loading="lazy" alt="لوجو الأسرة" onError={handleImageError} className="w-full h-full object-cover" />
                                             ) : (
                                                 <Users className="w-full h-full p-4 text-slate-400" />
                                             )}
@@ -719,7 +790,7 @@ export default function MasterDashboard() {
                         <div className="bg-white p-4 rounded-4xl shadow-sm border border-slate-200 flex items-center justify-between">
                             <div className="flex items-center gap-3">
                                 {activeOsra.logo ? (
-                                    <img src={activeOsra.logo} width="48" height="48" loading="eager" alt="لوجو الأسرة" className="w-12 h-12 rounded-full border-2 border-slate-100 object-cover" />
+                                    <img src={activeOsra.logo} width="48" height="48" loading="eager" alt="لوجو الأسرة" onError={handleImageError} className="w-12 h-12 rounded-full border-2 border-slate-100 object-cover" />
                                 ) : (
                                     <div className="w-12 h-12 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-500"><Users size={20} /></div>
                                 )}
@@ -777,8 +848,8 @@ export default function MasterDashboard() {
                                             <div className="absolute top-0 right-0 w-1.5 h-full bg-amber-400"></div>
 
                                             <div className="flex items-center gap-3 pr-2">
-                                                {servant.photoURL || servant.profileImage ? (
-                                                    <img src={servant.photoURL || servant.profileImage} alt={servant.name} className="w-11 h-11 rounded-full object-cover border-2 border-amber-200 shadow-sm shrink-0" />
+                                                {servant.photoURL || servant.profileImage || servant.profilePic ? (
+                                                    <img src={servant.photoURL || servant.profileImage || servant.profilePic} alt={servant.name} onError={handleImageError} className="w-11 h-11 rounded-full object-cover border-2 border-amber-200 shadow-sm shrink-0" />
                                                 ) : (
                                                     <div className="w-11 h-11 rounded-full bg-amber-50 flex items-center justify-center text-amber-600 font-black text-sm border-2 border-amber-200 shrink-0">
                                                         {(servant.name || 'خ').substring(0, 2)}

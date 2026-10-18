@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { db } from '../db/database';
 import { ShieldAlert, Key, Phone, User, LogIn, Loader2 } from 'lucide-react';
 import { firestore } from '../db/firebase';
-import { collection, getDocs, collectionGroup } from 'firebase/firestore';
+import { collection, getDocs, collectionGroup, getDoc, doc } from 'firebase/firestore';
 import { decryptData } from '../encryption';
 
 export default function ParentLogin() {
@@ -73,15 +73,11 @@ export default function ParentLogin() {
         setErrorMsg('');
         setIsLoading(true);
 
-        const cleanPhone = phoneNumber.trim().replace(/\D/g, '');
+        const rawInput = phoneNumber.trim();
+        const cleanPhone = rawInput.replace(/\D/g, '');
+        const cleanIdUpper = rawInput.toUpperCase();
 
         try {
-            if (!navigator.onLine) {
-                setErrorMsg('لا يوجد اتصال بالإنترنت. يرجى الاتصال بالشبكة للمحاولة.');
-                setIsLoading(false);
-                return;
-            }
-
             const targetClass = classes.find(c => c.name === selectedClass);
             if (!targetClass) {
                 setErrorMsg('الفصل المختار غير صالح.');
@@ -89,26 +85,70 @@ export default function ParentLogin() {
                 return;
             }
 
-            // 1. Query Firestore children collection group directly
-            const querySnapshot = await getDocs(collectionGroup(firestore, 'children'));
-            
             let match = null;
 
-            // 2. Loop and decrypt each child document to search for a match
-            for (const docSnap of querySnapshot.docs) {
+            // 1. If offline, try to find child in local Dexie database
+            if (!navigator.onLine) {
+                const localChildren = await db.children.where('syncKey').equals(targetClass.syncKey).toArray();
+                match = localChildren.find(c => {
+                    const idMatch = cleanIdUpper && String(c.id).trim().toUpperCase() === cleanIdUpper;
+                    const cPhone = c.phone ? String(c.phone).replace(/\D/g, '') : '';
+                    const mPhone = c.motherPhone ? String(c.motherPhone).replace(/\D/g, '') : '';
+                    const fPhone = c.fatherPhone ? String(c.fatherPhone).replace(/\D/g, '') : '';
+                    const pPhone = c.childPhone ? String(c.childPhone).replace(/\D/g, '') : '';
+                    const phoneMatch = cleanPhone && (
+                        (cPhone && cPhone.includes(cleanPhone)) ||
+                        (mPhone && mPhone.includes(cleanPhone)) ||
+                        (fPhone && fPhone.includes(cleanPhone)) ||
+                        (pPhone && pPhone.includes(cleanPhone))
+                    );
+                    return idMatch || phoneMatch;
+                });
+
+                if (match) {
+                    localStorage.setItem('parentChildId', match.id);
+                    localStorage.setItem('parentChildName', match.name);
+                    localStorage.setItem('parentSyncKey', match.syncKey);
+                    localStorage.setItem('parentClassName', selectedClass);
+                    navigate('/parent-dashboard');
+                    return;
+                } else {
+                    setErrorMsg('لا يوجد اتصال بالإنترنت، ولم يتم العثور على بيانات المخدوم محلياً.');
+                    setIsLoading(false);
+                    return;
+                }
+            }
+
+            // 2. Query target class children collection first (fastest and most specific)
+            let docsToScan = [];
+            try {
+                const classSnap = await getDocs(collection(firestore, 'Osras', targetClass.syncKey, 'children'));
+                docsToScan = classSnap.docs || [];
+            } catch (_) {}
+
+            // Fallback to collectionGroup if class query yielded nothing
+            if (docsToScan.length === 0) {
+                const groupSnap = await getDocs(collectionGroup(firestore, 'children'));
+                docsToScan = groupSnap.docs || [];
+            }
+
+            // 3. Loop and decrypt each child document to search for a match
+            for (const docSnap of docsToScan) {
                 const data = docSnap.data();
-                if (data) {
+                if (data && docSnap.id !== '_placeholder') {
                     const decrypted = data.payload ? decryptData(data.payload) : data;
                     if (decrypted) {
-                        const docSyncKey = docSnap.ref.parent.parent.id;
+                        const docSyncKey = docSnap.ref.parent?.parent?.id || targetClass.syncKey;
                         const childSyncKey = decrypted.syncKey || docSyncKey;
 
-                        // Check if syncKey matches targetClass.syncKey or className matches
                         const matchesClass = childSyncKey === targetClass.syncKey || 
                                              decrypted.className === selectedClass || 
                                              decrypted.osraName === selectedClass;
 
                         if (matchesClass) {
+                            const childDocId = String(decrypted.id || docSnap.id).trim().toUpperCase();
+                            const matchesId = cleanIdUpper && childDocId === cleanIdUpper;
+
                             const legacyPhone = decrypted.phone ? String(decrypted.phone).trim().replace(/\D/g, '') : '';
                             const motherPhone = decrypted.motherPhone ? String(decrypted.motherPhone).trim().replace(/\D/g, '') : '';
                             const fatherPhone = decrypted.fatherPhone ? String(decrypted.fatherPhone).trim().replace(/\D/g, '') : '';
@@ -120,7 +160,7 @@ export default function ParentLogin() {
                                 (fatherPhone && fatherPhone.includes(cleanPhone)) ||
                                 (personalPhone && personalPhone.includes(cleanPhone)));
 
-                            if (matchesPhone) {
+                            if (matchesId || matchesPhone) {
                                 match = {
                                     id: decrypted.id || docSnap.id,
                                     name: decrypted.name,
@@ -135,25 +175,24 @@ export default function ParentLogin() {
             }
 
             if (match) {
-                // 3. Save matching details to localStorage
+                // 4. Save matching details to localStorage
                 localStorage.setItem('parentChildId', match.id);
                 localStorage.setItem('parentChildName', match.name);
                 localStorage.setItem('parentSyncKey', match.syncKey);
                 localStorage.setItem('parentClassName', selectedClass);
 
-                // 4. Save matching details and attendance locally to Dexie for offline dashboards
+                // 5. Save FULL child record locally to Dexie for offline dashboards
                 await db.children.put({
+                    ...match,
                     id: String(match.id),
                     name: match.name,
-                    phone: match.phone || '',
-                    motherPhone: match.motherPhone || '',
-                    fatherPhone: match.fatherPhone || '',
-                    childPhone: match.childPhone || '',
                     syncKey: match.syncKey,
-                    className: selectedClass
+                    className: selectedClass,
+                    isDirty: false,
+                    isDeleted: false
                 });
 
-                // Fetch child's attendance from Firestore and save locally
+                // 6. Fetch child's attendance from Firestore and save locally
                 try {
                     const attendanceSnapshot = await getDocs(collection(firestore, 'Osras', match.syncKey, 'attendance'));
                     const localAttendanceRecords = [];
@@ -162,11 +201,11 @@ export default function ParentLogin() {
                         if (data && data.payload) {
                             const record = decryptData(data.payload);
                             if (record && String(record.childId) === String(match.id)) {
-                                localAttendanceRecords.push(record);
+                                localAttendanceRecords.push({ ...record, id: docSnap.id, syncKey: match.syncKey, isDirty: false, isDeleted: false });
                             }
                         } else if (data) {
                             if (String(data.childId) === String(match.id)) {
-                                localAttendanceRecords.push(data);
+                                localAttendanceRecords.push({ ...data, id: docSnap.id, syncKey: match.syncKey, isDirty: false, isDeleted: false });
                             }
                         }
                     });
@@ -177,10 +216,38 @@ export default function ParentLogin() {
                     console.error("Error fetching child attendance:", attErr);
                 }
 
+                // 7. Fetch child's exam grades from Firestore and save locally
+                try {
+                    const examsSnapshot = await getDocs(collection(firestore, 'Osras', match.syncKey, 'exams'));
+                    for (const examDoc of examsSnapshot.docs) {
+                        try {
+                            const gradeSnap = await getDoc(doc(firestore, 'Osras', match.syncKey, 'exams', examDoc.id, 'grades', String(match.id)));
+                            if (gradeSnap.exists()) {
+                                const gData = gradeSnap.data();
+                                const decryptedGrade = gData.payload ? decryptData(gData.payload) : gData;
+                                if (decryptedGrade) {
+                                    await db.grades.put({
+                                        childId: String(match.id),
+                                        examId: examDoc.id,
+                                        examName: decryptedGrade.examName || examDoc.data()?.examName || 'امتحان',
+                                        maxGrade: decryptedGrade.maxGrade || examDoc.data()?.maxGrade || 100,
+                                        grade: decryptedGrade.grade,
+                                        date: decryptedGrade.date || examDoc.data()?.date || '',
+                                        syncKey: match.syncKey,
+                                        isDirty: false
+                                    });
+                                }
+                            }
+                        } catch (_) {}
+                    }
+                } catch (grdErr) {
+                    console.error("Error fetching child grades:", grdErr);
+                }
+
                 // Redirect to parent dashboard
                 navigate('/parent-dashboard');
             } else {
-                setErrorMsg('لم يتم العثور على مخدوم مسجل بهذا الرقم في هذا الفصل.');
+                setErrorMsg('لم يتم العثور على مخدوم مسجل بهذا الكود أو الرقم في هذا الفصل.');
             }
         } catch (error) {
             console.error(error);
@@ -226,14 +293,14 @@ export default function ParentLogin() {
                     </div>
 
                     <div className="space-y-1">
-                        <label className="text-xs font-bold text-slate-600 ml-1">رقم التليفون (المسجل) *</label>
+                        <label className="text-xs font-bold text-slate-600 ml-1">كود المخدوم أو رقم التليفون المسجل *</label>
                         <div className="relative">
                             <Phone className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
                             <input 
-                                type="tel" 
+                                type="text" 
                                 value={phoneNumber}
                                 onChange={(e) => setPhoneNumber(e.target.value)}
-                                placeholder="01xxxxxxxxx"
+                                placeholder="مثال: 2026-B-0012 أو 01xxxxxxxxx"
                                 className="w-full pl-10 pr-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 required
                             />

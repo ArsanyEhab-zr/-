@@ -194,6 +194,10 @@ export default function ExamsManager() {
                     await db.grades.update(match.id, { isDeleted: true, isDirty: true, updatedAt: now });
                 }
             } else {
+                const targetSyncKey = (selectedExam.syncKey && selectedExam.syncKey !== 'MASTER_ACCESS' && selectedExam.syncKey !== 'ADMIN_MODE')
+                    ? selectedExam.syncKey
+                    : currentSyncKey;
+
                 if (match) {
                     // Update existing grade
                     await db.grades.update(match.id, { grade: gradeVal, isDirty: true, updatedAt: now, isDeleted: false });
@@ -206,7 +210,7 @@ export default function ExamsManager() {
                         examName: selectedExam.examName,
                         maxGrade: selectedExam.maxGrade,
                         date: selectedExam.date,
-                        syncKey: currentSyncKey,
+                        syncKey: targetSyncKey,
                         isDirty: true,
                         updatedAt: now,
                         isDeleted: false
@@ -218,8 +222,12 @@ export default function ExamsManager() {
             triggerAutoSync();
 
             // 3. Best-effort direct Firebase write (non-blocking)
-            if (navigator.onLine && examId) {
-                const gradeDocRef = doc(firestore, 'Osras', currentSyncKey, 'exams', examId, 'grades', childIdStr);
+            const targetSyncKey = (selectedExam.syncKey && selectedExam.syncKey !== 'MASTER_ACCESS' && selectedExam.syncKey !== 'ADMIN_MODE')
+                ? selectedExam.syncKey
+                : currentSyncKey;
+
+            if (navigator.onLine && examId && targetSyncKey && targetSyncKey !== 'MASTER_ACCESS' && targetSyncKey !== 'ADMIN_MODE') {
+                const gradeDocRef = doc(firestore, 'Osras', targetSyncKey, 'exams', examId, 'grades', childIdStr);
 
                 if (gradeVal === "") {
                     // Delete from Firebase
@@ -235,7 +243,7 @@ export default function ExamsManager() {
                         examName: selectedExam.examName,
                         maxGrade: selectedExam.maxGrade,
                         date: selectedExam.date,
-                        syncKey: currentSyncKey,
+                        syncKey: targetSyncKey,
                         updatedAt: now
                     };
                     const encryptedPayload = encryptData(gradeDataForCloud);

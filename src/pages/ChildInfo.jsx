@@ -4,6 +4,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
 import useAutoSync from '../hooks/useAutoSync';
 import { ArrowRight, Phone, MapPin, ClipboardList, Briefcase, Calendar, Info, Map, AlertTriangle, PartyPopper } from 'lucide-react';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function ChildInfo() {
     const { id } = useParams();
@@ -18,9 +19,13 @@ export default function ChildInfo() {
         triggerAutoSync();
     }, [triggerAutoSync]);
 
-    const child = useLiveQuery(() => {
-        if (childId) return db.children.get(childId);
-        return null;
+    const child = useLiveQuery(async () => {
+        if (!childId) return null;
+        let res = await db.children.get(childId);
+        if (!res && /^\d+$/.test(childId)) {
+            res = await db.children.get(Number(childId));
+        }
+        return res;
     }, [childId]);
 
     // لو مفيش ID مبعوت من الأساس
@@ -86,7 +91,7 @@ export default function ChildInfo() {
                 <div className="flex items-center justify-between mb-6 bg-white/90 backdrop-blur-md p-5 rounded-[2.5rem] shadow-sm border border-slate-200">
                     <div className="flex items-center gap-4">
                         <div className={`w-20 h-20 rounded-full bg-${themeColor}-100 flex items-center justify-center text-4xl shadow-inner overflow-hidden border-4 ${isBday ? 'border-yellow-400' : 'border-white'}`}>
-                            {child.profilePic ? <img src={child.profilePic} className="w-full h-full object-cover" alt={child.name} /> : (isGirl ? '👧' : '👦')}
+                            {child.profilePic ? <img src={child.profilePic} onError={handleImageError} className="w-full h-full object-cover" alt={child.name} /> : (isGirl ? '👧' : '👦')}
                         </div>
                         <div>
                             <h1 className="text-xl md:text-2xl font-black text-slate-800">{(!isGirl && child.isOrdained) ? (child.ordinationRank || 'شماس') + ' / ' : ''}{child.name}</h1>

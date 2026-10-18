@@ -4,20 +4,27 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
 import useAutoSync from '../hooks/useAutoSync';
 import { ArrowRight, Phone, Save, History, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { handleImageError } from '../utils/imageUtils';
 
 const ChildProfile = () => {
     const { triggerAutoSync } = useAutoSync();
     const { id } = useParams();
     const navigate = useNavigate();
     const childId = String(id);
-    const child = useLiveQuery(() => db.children.get(childId));
+    const child = useLiveQuery(async () => {
+        let res = await db.children.get(childId);
+        if (!res && /^\d+$/.test(childId)) {
+            res = await db.children.get(Number(childId));
+        }
+        return res;
+    }, [childId]);
 
     const [isSaving, setIsSaving] = useState(false);
     const [aiSummary, setAiSummary] = useState('');
     const [isInterventionRequired, setIsInterventionRequired] = useState(false);
 
     const saveNote = async () => {
-        if (!aiSummary || isSaving) return;
+        if (!aiSummary || isSaving || !child) return;
         setIsSaving(true);
         
         const now = new Date().toISOString();
@@ -34,7 +41,7 @@ const ChildProfile = () => {
         };
         
         const updatedNotes = child.notes ? [...child.notes, newNote] : [newNote];
-        await db.children.update(childId, { 
+        await db.children.update(child.id, { 
             notes: updatedNotes, 
             last_visited: now.split('T')[0],
             isDirty: true,
@@ -65,7 +72,7 @@ const ChildProfile = () => {
                 <div className="flex items-center justify-between mb-8 bg-white/80 backdrop-blur-md p-4 rounded-[2.5rem] shadow-sm border border-slate-200">
                     <div className="flex items-center gap-4">
                         <div className={`w-14 h-14 rounded-full ${themeBg} flex items-center justify-center text-3xl shadow-inner overflow-hidden`}>
-                            {child.profilePic ? <img src={child.profilePic} width="56" height="56" loading="eager" className="w-full h-full object-cover" alt={child.name} /> : (isGirl ? '👧' : '👦')}
+                            {child.profilePic ? <img src={child.profilePic} width="56" height="56" loading="eager" onError={handleImageError} className="w-full h-full object-cover" alt={child.name} /> : (isGirl ? '👧' : '👦')}
                         </div>
                         <div>
                             <h1 className="text-xl md:text-2xl font-black text-slate-800 flex items-center gap-2 flex-wrap">

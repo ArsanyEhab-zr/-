@@ -4,8 +4,10 @@ import { QRCodeCanvas } from 'qrcode.react';
 import { LogOut, Award, CheckCheck, Music, Play, Pause, UserCircle } from 'lucide-react';
 import { firestore } from '../db/firebase';
 import { doc, collection, collectionGroup, query, where, onSnapshot } from 'firebase/firestore';
+import { db } from '../db/database';
 import { decryptData } from '../encryption';
 import { TENANT_CONFIG } from '../config/tenantConfig';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function ParentDashboard() {
     const navigate = useNavigate();
@@ -23,6 +25,36 @@ export default function ParentDashboard() {
             navigate('/parent-login');
         }
     }, [childId, navigate]);
+
+    // Initial Dexie fallback for instant offline rendering
+    useEffect(() => {
+        if (!childId) return;
+        const loadFromDexie = async () => {
+            try {
+                const targetIdStr = String(childId).trim();
+                const localChild = await db.children.get(targetIdStr);
+                if (localChild) setChildInfo(prev => prev || localChild);
+
+                const localAtt = await db.attendance.where('childId').equals(targetIdStr).toArray();
+                if (localAtt && localAtt.length > 0) {
+                    setAttendance(prev => prev.length === 0 ? localAtt : prev);
+                }
+
+                const localGrades = await db.grades.where('childId').equals(targetIdStr).toArray();
+                if (localGrades && localGrades.length > 0) {
+                    setGrades(prev => prev.length === 0 ? localGrades.map(g => ({
+                        examName: g.examName,
+                        date: g.date,
+                        grade: g.grade,
+                        maxGrade: g.maxGrade
+                    })) : prev);
+                }
+            } catch (e) {
+                console.warn('Dexie fallback in ParentDashboard:', e);
+            }
+        };
+        loadFromDexie();
+    }, [childId]);
 
     useEffect(() => {
         if (!childId || !syncKey) return;
@@ -190,6 +222,7 @@ export default function ParentDashboard() {
                                     src={childImg} 
                                     alt={displayName} 
                                     className="w-full h-full object-cover"
+                                    onError={handleImageError}
                                 />
                             ) : (
                                 <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-blue-900/40 to-amber-500/20">

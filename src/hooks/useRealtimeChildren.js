@@ -194,6 +194,70 @@ export default function useRealtimeChildren() {
             }
         };
 
+        /**
+         * Process Firestore snapshot changes for attendance in real time
+         */
+        const handleAttendanceSnapshot = async (snapshot, targetClassKey = null) => {
+            if (!snapshot) return;
+            try {
+                const changes = snapshot.docChanges();
+                const now = new Date().toISOString();
+
+                for (const change of changes) {
+                    const docId = change.doc.id;
+                    if (docId === '_placeholder') continue;
+                    const rawData = change.doc.data();
+                    if (!rawData || rawData.placeholder || rawData.isPlaceholder) continue;
+
+                    let data = rawData.payload ? decryptData(rawData.payload) : rawData;
+                    if (!data || !data.date || !data.childId || !data.type) continue;
+
+                    const date = String(data.date);
+                    const childId = String(data.childId);
+                    const type = String(data.type);
+
+                    const existingRecords = await db.attendance
+                        .where('date')
+                        .equals(date)
+                        .filter(a => String(a.childId) === childId && a.type === type)
+                        .toArray();
+
+                    if (change.type === 'removed' || data.isDeleted) {
+                        for (const rec of existingRecords) {
+                            if (!rec.isDirty) {
+                                try { await db.attendance.delete(rec.id); } catch (_) {}
+                            }
+                        }
+                    } else if (change.type === 'added' || change.type === 'modified') {
+                        const effectiveSyncKey = String(targetClassKey || data.syncKey || currentSyncKey || '');
+                        const attPayload = {
+                            ...data,
+                            childId: data.childId,
+                            syncKey: effectiveSyncKey,
+                            isDirty: false,
+                            isDeleted: false,
+                            updatedAt: data.updatedAt || now
+                        };
+
+                        if (existingRecords.length > 0) {
+                            const first = existingRecords[0];
+                            if (!first.isDirty) {
+                                await db.attendance.update(first.id, attPayload);
+                            }
+                            // Clean up duplicates if any
+                            for (let i = 1; i < existingRecords.length; i++) {
+                                try { await db.attendance.delete(existingRecords[i].id); } catch (_) {}
+                            }
+                        } else {
+                            await db.attendance.add(attPayload);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn('⚠️ [RealtimeSync] Attendance snapshot error:', err);
+            }
+        };
+
         try {
             if (isMaster) {
                 // Subscribe to each registered class individually for 100% precision and reliability
@@ -203,41 +267,64 @@ export default function useRealtimeChildren() {
 
                 if (activeOsraKeys.length > 0) {
                     for (const classKey of activeOsraKeys) {
-                        const ref = collection(firestore, 'Osras', classKey, 'children');
-                        const unsub = onSnapshot(
-                            ref,
+                        const childRef = collection(firestore, 'Osras', classKey, 'children');
+                        const attRef = collection(firestore, 'Osras', classKey, 'attendance');
+
+                        unsubsRef.current.push(onSnapshot(
+                            childRef,
                             snap => handleSnapshot(snap, classKey),
                             err => console.warn(`⚠️ [RealtimeSync] Class ${classKey} error:`, err?.message)
-                        );
-                        unsubsRef.current.push(unsub);
+                        ));
+                        unsubsRef.current.push(onSnapshot(
+                            attRef,
+                            snap => handleAttendanceSnapshot(snap, classKey),
+                            err => console.warn(`⚠️ [RealtimeSync] Class ${classKey} attendance error:`, err?.message)
+                        ));
                     }
                 } else {
                     const q = collectionGroup(firestore, 'children');
-                    const unsub = onSnapshot(
+                    unsubsRef.current.push(onSnapshot(
                         q, 
                         snap => handleSnapshot(snap, null), 
                         err => console.warn('⚠️ [RealtimeSync] Master query error:', err?.message)
-                    );
-                    unsubsRef.current.push(unsub);
+                    ));
+                    const attGroup = collectionGroup(firestore, 'attendance');
+                    unsubsRef.current.push(onSnapshot(
+                        attGroup,
+                        snap => handleAttendanceSnapshot(snap, null),
+                        err => console.warn('⚠️ [RealtimeSync] Master attendance query error:', err?.message)
+                    ));
                 }
             } else if (isStageAdmin) {
                 for (const classKey of allowedClasses) {
-                    const ref = collection(firestore, 'Osras', classKey, 'children');
-                    const unsub = onSnapshot(
-                        ref, 
+                    const childRef = collection(firestore, 'Osras', classKey, 'children');
+                    const attRef = collection(firestore, 'Osras', classKey, 'attendance');
+
+                    unsubsRef.current.push(onSnapshot(
+                        childRef, 
                         snap => handleSnapshot(snap, classKey), 
                         err => console.warn(`⚠️ [RealtimeSync] Stage class ${classKey} error:`, err?.message)
-                    );
-                    unsubsRef.current.push(unsub);
+                    ));
+                    unsubsRef.current.push(onSnapshot(
+                        attRef,
+                        snap => handleAttendanceSnapshot(snap, classKey),
+                        err => console.warn(`⚠️ [RealtimeSync] Stage class ${classKey} attendance error:`, err?.message)
+                    ));
                 }
             } else {
-                const ref = collection(firestore, 'Osras', currentSyncKey, 'children');
-                const unsub = onSnapshot(
-                    ref, 
+                const childRef = collection(firestore, 'Osras', currentSyncKey, 'children');
+                const attRef = collection(firestore, 'Osras', currentSyncKey, 'attendance');
+
+                unsubsRef.current.push(onSnapshot(
+                    childRef, 
                     snap => handleSnapshot(snap, currentSyncKey), 
                     err => console.warn(`⚠️ [RealtimeSync] Class ${currentSyncKey} error:`, err?.message)
-                );
-                unsubsRef.current.push(unsub);
+                ));
+                unsubsRef.current.push(onSnapshot(
+                    attRef,
+                    snap => handleAttendanceSnapshot(snap, currentSyncKey),
+                    err => console.warn(`⚠️ [RealtimeSync] Class ${currentSyncKey} attendance error:`, err?.message)
+                ));
             }
         } catch (setupErr) {
             console.warn('⚠️ [RealtimeSync] Failed to initialize Firestore listener:', setupErr);

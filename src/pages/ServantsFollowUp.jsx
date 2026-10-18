@@ -3,6 +3,8 @@ import { ArrowRight, ClipboardList, Search, Save, CheckCircle2, Calendar } from 
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, collection, getDocs, onSnapshot, query, where, setDoc } from 'firebase/firestore';
 import { firestore } from '../db/firebase';
+import { buildCanonicalServantIndex } from '../utils/servantUtils';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function ServantsFollowUp() {
     const navigate = useNavigate();
@@ -52,13 +54,23 @@ export default function ServantsFollowUp() {
     };
 
     const [servantsData, setServantsData] = useState([]);
+    const [refreshKey, setRefreshKey] = useState(0);
+
+    useEffect(() => {
+        const handleServantUpdate = () => setRefreshKey(k => k + 1);
+        window.addEventListener('servant-updated', handleServantUpdate);
+        window.addEventListener('storage', handleServantUpdate);
+        return () => {
+            window.removeEventListener('servant-updated', handleServantUpdate);
+            window.removeEventListener('storage', handleServantUpdate);
+        };
+    }, []);
     
     // 🌟 1. Fetch Servants & Listen to Attendance in Real-Time
     useEffect(() => {
         let unsubscribe = () => {};
 
         const fetchAndListen = async () => {
-            // First fetch the servants from either the old mainConfig or the new servants collection
             let baseServants = [];
             try {
                 const configSnap = await getDoc(doc(firestore, 'System', 'mainConfig'));
@@ -66,16 +78,16 @@ export default function ServantsFollowUp() {
                     baseServants = configSnap.data().servants || [];
                 }
                 const servantsSnap = await getDocs(collection(firestore, "servants"));
-                servantsSnap.forEach(doc => {
-                    if (doc.id !== '_placeholder' && !baseServants.find(s => s.phone === doc.data().phone)) {
-                        baseServants.push({ ...doc.data(), uid: doc.id });
+                servantsSnap.forEach(docSnap => {
+                    if (docSnap.id !== '_placeholder' && !baseServants.find(s => s.phone === docSnap.data().phone)) {
+                        baseServants.push({ ...docSnap.data(), uid: docSnap.id });
                     }
                 });
             } catch (err) {
                 console.error("Error fetching base servants:", err);
             }
 
-            // 🚨 CRITICAL BUG FIX: Exclude deleted servants
+            // Exclude deleted servants
             try {
                 const appSettingsStr = localStorage.getItem('appSettings');
                 if (appSettingsStr) {
@@ -92,21 +104,26 @@ export default function ServantsFollowUp() {
                 console.error("Error filtering active servants:", err);
             }
 
+            // 👑 Build canonical servant index to resolve any UID / Phone / Name variation
+            const { canonicalList, resolveServant } = buildCanonicalServantIndex(baseServants);
+
             // Prepare a map with default values
             const servantsMap = {};
-            baseServants.forEach(s => {
-                const sId = s.uid || s.phone; // fallback to phone if no uid
+            canonicalList.forEach(s => {
+                const sId = s.canonicalId;
                 servantsMap[sId] = {
                     id: sId,
                     uid: sId,
+                    canonicalId: sId,
+                    phone: s.phone,
                     name: s.name,
-                    osraName: s.osraName || s.syncKey || "غير محدد",
+                    osraName: s.osraName || s.assignedOsra || s.syncKey || "غير محدد",
                     weekDate,
                     month: weekDate.substring(0, 7),
                     attendance: "حضور",
                     liturgy: false, preparation: false, meeting: false, visitation: false,
-                    confessionDate: "", activitiesService: false, activitiesDiocese: "", tasks: "", leaderNotes: "",
-                    profileImage: s.profileImage || ""
+                    confessionDate: s.confessionFather || "", activitiesService: false, activitiesDiocese: "", tasks: "", leaderNotes: "",
+                    profileImage: s.photoURL || s.profilePic || s.profileImage || ""
                 };
             });
 
@@ -117,8 +134,14 @@ export default function ServantsFollowUp() {
                 const currentData = { ...servantsMap }; // Reset to base map
                 snapshot.forEach(docSnap => {
                     const data = docSnap.data();
-                    if (currentData[data.uid]) {
-                        currentData[data.uid] = { ...currentData[data.uid], ...data };
+                    const matchedServant = resolveServant(data);
+                    if (matchedServant && currentData[matchedServant.canonicalId]) {
+                        currentData[matchedServant.canonicalId] = { 
+                            ...currentData[matchedServant.canonicalId], 
+                            ...data,
+                            id: matchedServant.canonicalId,
+                            uid: matchedServant.canonicalId
+                        };
                     }
                 });
                 setServantsData(Object.values(currentData));
@@ -127,7 +150,7 @@ export default function ServantsFollowUp() {
 
         fetchAndListen();
         return () => unsubscribe();
-    }, [weekDate]);
+    }, [weekDate, refreshKey]);
 
     const handleUpdate = async (id, field, value) => {
         // Optimistic UI update
@@ -249,7 +272,7 @@ export default function ServantsFollowUp() {
                                     <tr key={s.id} className="hover:bg-slate-800/80 transition-colors">
                                         <td className="p-2 text-center border-r border-slate-700">
                                             {s.profileImage ? (
-                                                <img src={s.profileImage} alt={s.name} className="w-10 h-10 rounded-full mx-auto object-cover border-2 border-slate-600" />
+                                                <img src={s.profileImage} alt={s.name} onError={handleImageError} className="w-10 h-10 rounded-full mx-auto object-cover border-2 border-slate-600" />
                                             ) : (
                                                 <div className="w-10 h-10 rounded-full mx-auto bg-slate-700 flex items-center justify-center text-slate-400">
                                                     <span className="text-xs">{s.name.substring(0, 2)}</span>

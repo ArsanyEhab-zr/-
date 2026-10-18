@@ -28,6 +28,8 @@ export default function ServantSelfCheckIn() {
 
     const [record, setRecord] = useState({
         uid: currentServant.uid || currentServant.phone,
+        phone: currentServant.phone || "",
+        servantId: currentServant.id || currentServant.uid || currentServant.phone,
         name: currentServant.name || "خادم",
         weekDate,
         month: monthYear,

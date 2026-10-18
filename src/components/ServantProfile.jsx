@@ -1,10 +1,11 @@
 /* eslint-disable no-unused-vars */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Camera, MapPin, Save, UserCircle, Users, Shield, CheckCircle, CalendarCheck, Loader2, ImagePlus, Sparkles } from 'lucide-react';
+import { X, Camera, MapPin, Save, UserCircle, Users, Shield, CheckCircle, CalendarCheck, Loader2, ImagePlus, Sparkles, Calendar, Heart, FileText } from 'lucide-react';
 import { doc, getDoc, updateDoc, setDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { firestore } from '../db/firebase';
 import { db } from '../db/database';
 import { uploadImageToCloudinary } from '../utils/cloudinary';
+import { compressImageToBase64, handleImageError } from '../utils/imageUtils';
 
 // 🎨 Role badge config — color-coded for visual hierarchy
 const ROLE_BADGES = {
@@ -40,13 +41,19 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
 
     // ─── State ───
     const [address, setAddress] = useState(servant.address || '');
-    const [photoURL, setPhotoURL] = useState(servant.photoURL || servant.profileImage || '');
+    const [confessionFather, setConfessionFather] = useState(servant.confessionFather || servant.fatherConfessor || '');
+    const [birthDate, setBirthDate] = useState(servant.birthDate || '');
+    const [notes, setNotes] = useState(servant.notes || servant.specialNotes || '');
+    const [photoURL, setPhotoURL] = useState(servant.photoURL || servant.profileImage || servant.profilePic || '');
     const [isUploading, setIsUploading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [attendanceCount, setAttendanceCount] = useState(null);
     const [isLoadingAttendance, setIsLoadingAttendance] = useState(true);
     const [editingAddress, setEditingAddress] = useState(false);
+    const [editingConfession, setEditingConfession] = useState(false);
+    const [editingBirthDate, setEditingBirthDate] = useState(false);
+    const [editingNotes, setEditingNotes] = useState(false);
     const fileInputRef = useRef(null);
 
     // ─── Resolve the osra (family) name from appSettings ───
@@ -115,15 +122,21 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
     useEffect(() => {
         if (isOpen) {
             setAddress(servant.address || '');
-            setPhotoURL(servant.photoURL || servant.profileImage || '');
+            setConfessionFather(servant.confessionFather || servant.fatherConfessor || '');
+            setBirthDate(servant.birthDate || '');
+            setNotes(servant.notes || servant.specialNotes || '');
+            setPhotoURL(servant.photoURL || servant.profileImage || servant.profilePic || '');
             setSaveSuccess(false);
             setEditingAddress(false);
+            setEditingConfession(false);
+            setEditingBirthDate(false);
+            setEditingNotes(false);
         }
     // Only reset when the modal opens or the servant identity changes, NOT on every render
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen, servantUID]);
 
-    // ─── Image Upload Handler ───
+    // ─── Image Upload Handler with Offline Fallback ───
     const handleImageUpload = async (e) => {
         const file = e.target.files?.[0];
         if (!file) return;
@@ -140,15 +153,29 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
 
         setIsUploading(true);
         try {
-            // Upload via Cloudinary (unsigned preset — same pattern as rest of the app)
-            const downloadURL = await uploadImageToCloudinary(file, 'image');
+            let downloadURL = null;
+            if (navigator.onLine) {
+                try {
+                    downloadURL = await uploadImageToCloudinary(file, 'image');
+                } catch (cloudErr) {
+                    console.warn('[ServantProfile] Cloudinary failed, falling back to base64 compression:', cloudErr);
+                }
+            }
+            if (!downloadURL) {
+                downloadURL = await compressImageToBase64(file);
+            }
+
             setPhotoURL(downloadURL);
 
-            // Update Firestore & localStorage immediately
-            await updateServantData({ photoURL: downloadURL });
+            // Update Firestore & localStorage immediately across all aliases
+            await updateServantData({
+                photoURL: downloadURL,
+                profilePic: downloadURL,
+                profileImage: downloadURL
+            });
         } catch (error) {
             console.error('[ServantProfile] Upload error:', error);
-            alert('حدث خطأ أثناء رفع الصورة. حاول مرة أخرى.');
+            alert('حدث خطأ أثناء معالجة الصورة. حاول مرة أخرى.');
         } finally {
             setIsUploading(false);
         }
@@ -165,6 +192,54 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
         } catch (error) {
             console.error('[ServantProfile] Save address error:', error);
             alert('حدث خطأ أثناء حفظ العنوان.');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    // ─── Save Confession Father ───
+    const handleSaveConfession = async () => {
+        setIsSaving(true);
+        try {
+            await updateServantData({ confessionFather, fatherConfessor: confessionFather });
+            setSaveSuccess(true);
+            setEditingConfession(false);
+            setTimeout(() => setSaveSuccess(false), 2500);
+        } catch (error) {
+            console.error('[ServantProfile] Save confession father error:', error);
+            alert('حدث خطأ أثناء حفظ أب الاعتراف.');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    // ─── Save Birthdate ───
+    const handleSaveBirthDate = async () => {
+        setIsSaving(true);
+        try {
+            await updateServantData({ birthDate });
+            setSaveSuccess(true);
+            setEditingBirthDate(false);
+            setTimeout(() => setSaveSuccess(false), 2500);
+        } catch (error) {
+            console.error('[ServantProfile] Save birthdate error:', error);
+            alert('حدث خطأ أثناء حفظ تاريخ الميلاد.');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    // ─── Save Notes ───
+    const handleSaveNotes = async () => {
+        setIsSaving(true);
+        try {
+            await updateServantData({ notes, specialNotes: notes });
+            setSaveSuccess(true);
+            setEditingNotes(false);
+            setTimeout(() => setSaveSuccess(false), 2500);
+        } catch (error) {
+            console.error('[ServantProfile] Save notes error:', error);
+            alert('حدث خطأ أثناء حفظ الملاحظات.');
         } finally {
             setIsSaving(false);
         }
@@ -188,29 +263,30 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
                 const config = configSnap.data();
                 const servantsList = config.servants || [];
 
-                console.log('[ServantProfile] Firestore servants count:', servantsList.length);
-
                 // Robust matching: try phone first (most reliable), then uid
                 const servantPhone = freshServant.phone;
                 const servantUid = freshServant.uid;
                 const idx = servantsList.findIndex(s =>
                     (servantPhone && s.phone === servantPhone) ||
-                    (servantUid && s.uid === servantUid)
+                    (servantUid && s.uid === servantUid) ||
+                    (freshServant.name && s.name === freshServant.name)
                 );
 
                 if (idx > -1) {
-                    console.log('[ServantProfile] ✅ Found servant at index:', idx, '| Name:', servantsList[idx].name);
                     servantsList[idx] = { ...servantsList[idx], ...updates };
                     updatedServantRecord = servantsList[idx];
 
                     await updateDoc(configRef, { servants: servantsList });
                     console.log('[ServantProfile] ✅ Firestore mainConfig updated successfully');
-                } else {
-                    console.error('[ServantProfile] ❌ Servant NOT found in mainConfig! phone:', servantPhone, 'uid:', servantUid);
-                    console.error('[ServantProfile] Available phones:', servantsList.map(s => s.phone));
                 }
-            } else {
-                console.error('[ServantProfile] ❌ mainConfig document does not exist!');
+            }
+
+            // Also update the servants collection doc if present
+            if (freshServant.uid) {
+                try {
+                    const sDocRef = doc(firestore, 'servants', String(freshServant.uid));
+                    await setDoc(sDocRef, updates, { merge: true });
+                } catch (_) {}
             }
         } catch (err) {
             console.error('[ServantProfile] ❌ Firestore update error:', err);
@@ -218,7 +294,6 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
 
         // 2. Update localStorage (currentServant + appSettings)
         localStorage.setItem('currentServant', JSON.stringify(updatedServantRecord));
-        console.log('[ServantProfile] ✅ localStorage currentServant updated');
 
         try {
             const localSettings = JSON.parse(localStorage.getItem('appSettings') || '{}');
@@ -227,14 +302,14 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
             const servantUid = freshServant.uid;
             const idx = servantsList.findIndex(s =>
                 (servantPhone && s.phone === servantPhone) ||
-                (servantUid && s.uid === servantUid)
+                (servantUid && s.uid === servantUid) ||
+                (freshServant.name && s.name === freshServant.name)
             );
 
             if (idx > -1) {
                 servantsList[idx] = { ...servantsList[idx], ...updates };
                 localSettings.servants = servantsList;
                 localStorage.setItem('appSettings', JSON.stringify(localSettings));
-                console.log('[ServantProfile] ✅ localStorage appSettings updated');
             }
         } catch (err) {
             console.error('[ServantProfile] ❌ localStorage update error:', err);
@@ -246,10 +321,8 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
                 const existing = await db.servants.where('phone').equals(updatedServantRecord.phone).first();
                 if (existing) {
                     await db.servants.put({ ...existing, ...updates });
-                    console.log('[ServantProfile] ✅ Dexie DB updated (existing record)');
                 } else if (updatedServantRecord.id) {
                     await db.servants.put(updatedServantRecord);
-                    console.log('[ServantProfile] ✅ Dexie DB updated (new record)');
                 }
             }
         } catch (err) {
@@ -260,9 +333,17 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
         if (isSelfView) {
             setLocalServant(updatedServantRecord);
         }
-        // Also update the local display states
         if (updates.photoURL) setPhotoURL(updates.photoURL);
         if (updates.address !== undefined) setAddress(updates.address);
+        if (updates.confessionFather !== undefined) setConfessionFather(updates.confessionFather);
+        if (updates.birthDate !== undefined) setBirthDate(updates.birthDate);
+        if (updates.notes !== undefined) setNotes(updates.notes);
+
+        // 5. Broadcast real-time profile update event across the entire application
+        try {
+            window.dispatchEvent(new CustomEvent('servant-updated', { detail: updatedServantRecord }));
+            window.dispatchEvent(new Event('storage'));
+        } catch (_) {}
     };
 
     // ─── Don't render if closed ───
@@ -310,6 +391,7 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
                             <img
                                 src={photoURL}
                                 alt={servant.name}
+                                onError={handleImageError}
                                 className="w-28 h-28 rounded-full object-cover border-4 border-white shadow-xl bg-slate-100"
                             />
                         ) : (
@@ -432,6 +514,140 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
                                     <CheckCircle size={14} /> تم حفظ العنوان بنجاح!
                                 </div>
                             )}
+                        </div>
+
+                        {/* Confession Father Card */}
+                        <div className="p-4 bg-purple-50 rounded-2xl border border-purple-100">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-xl bg-purple-100 flex items-center justify-center text-purple-600 shrink-0">
+                                    <Heart size={20} />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-[10px] font-bold text-purple-400 mb-0.5">أب الاعتراف</p>
+                                    {canEdit && editingConfession ? (
+                                        <div className="flex gap-2 items-center">
+                                            <input
+                                                type="text"
+                                                value={confessionFather}
+                                                onChange={(e) => setConfessionFather(e.target.value)}
+                                                placeholder="اسم أب الاعتراف..."
+                                                className="flex-1 text-sm font-bold text-slate-700 bg-white border border-purple-200 rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-purple-400"
+                                                autoFocus
+                                            />
+                                            <button
+                                                onClick={handleSaveConfession}
+                                                disabled={isSaving}
+                                                className="shrink-0 w-9 h-9 bg-purple-600 text-white rounded-xl flex items-center justify-center hover:bg-purple-700 transition-colors shadow-sm active:scale-90"
+                                            >
+                                                {isSaving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="flex items-center gap-2">
+                                            <p className="text-sm font-black text-purple-800 flex-1 truncate">
+                                                {confessionFather || servant.confessionFather || servant.fatherConfessor || 'لم يتم تحديد أب الاعتراف'}
+                                            </p>
+                                            {canEdit && (
+                                                <button
+                                                    onClick={() => setEditingConfession(true)}
+                                                    className="shrink-0 text-[10px] font-black text-purple-600 bg-purple-100 px-2.5 py-1 rounded-lg hover:bg-purple-200 transition-colors"
+                                                >
+                                                    تعديل
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Birthdate Card */}
+                        <div className="p-4 bg-sky-50 rounded-2xl border border-sky-100">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-xl bg-sky-100 flex items-center justify-center text-sky-600 shrink-0">
+                                    <Calendar size={20} />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-[10px] font-bold text-sky-400 mb-0.5">تاريخ الميلاد</p>
+                                    {canEdit && editingBirthDate ? (
+                                        <div className="flex gap-2 items-center">
+                                            <input
+                                                type="date"
+                                                value={birthDate}
+                                                onChange={(e) => setBirthDate(e.target.value)}
+                                                className="flex-1 text-sm font-bold text-slate-700 bg-white border border-sky-200 rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-sky-400"
+                                                autoFocus
+                                            />
+                                            <button
+                                                onClick={handleSaveBirthDate}
+                                                disabled={isSaving}
+                                                className="shrink-0 w-9 h-9 bg-sky-600 text-white rounded-xl flex items-center justify-center hover:bg-sky-700 transition-colors shadow-sm active:scale-90"
+                                            >
+                                                {isSaving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="flex items-center gap-2">
+                                            <p className="text-sm font-black text-sky-800 flex-1 truncate">
+                                                {birthDate || servant.birthDate || 'لم يتم تسجيل تاريخ الميلاد'}
+                                            </p>
+                                            {canEdit && (
+                                                <button
+                                                    onClick={() => setEditingBirthDate(true)}
+                                                    className="shrink-0 text-[10px] font-black text-sky-600 bg-sky-100 px-2.5 py-1 rounded-lg hover:bg-sky-200 transition-colors"
+                                                >
+                                                    تعديل
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Notes Card */}
+                        <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center text-amber-600 shrink-0">
+                                    <FileText size={20} />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-[10px] font-bold text-amber-500 mb-0.5">ملاحظات شخصية</p>
+                                    {canEdit && editingNotes ? (
+                                        <div className="flex gap-2 items-center">
+                                            <input
+                                                type="text"
+                                                value={notes}
+                                                onChange={(e) => setNotes(e.target.value)}
+                                                placeholder="أدخل أي ملاحظات..."
+                                                className="flex-1 text-sm font-bold text-slate-700 bg-white border border-amber-200 rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-amber-400"
+                                                autoFocus
+                                            />
+                                            <button
+                                                onClick={handleSaveNotes}
+                                                disabled={isSaving}
+                                                className="shrink-0 w-9 h-9 bg-amber-600 text-white rounded-xl flex items-center justify-center hover:bg-amber-700 transition-colors shadow-sm active:scale-90"
+                                            >
+                                                {isSaving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="flex items-center gap-2">
+                                            <p className="text-sm font-black text-amber-800 flex-1 truncate">
+                                                {notes || servant.notes || servant.specialNotes || 'لا توجد ملاحظات'}
+                                            </p>
+                                            {canEdit && (
+                                                <button
+                                                    onClick={() => setEditingNotes(true)}
+                                                    className="shrink-0 text-[10px] font-black text-amber-600 bg-amber-100 px-2.5 py-1 rounded-lg hover:bg-amber-200 transition-colors"
+                                                >
+                                                    تعديل
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
                         </div>
 
                         {/* ═══ Attendance Counter — Big Stat Card ═══ */}

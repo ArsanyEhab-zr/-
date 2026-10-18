@@ -131,12 +131,17 @@ export default function ExcelImporter() {
                     const genderRaw = trimStr(row["gender"] || row["النوع"]).toLowerCase();
                     const gender = (genderRaw === "بنت" || genderRaw === "girl" || genderRaw === "female") ? "بنت" : "ولد";
 
+                    const rowSyncKey = trimStr(row["syncKey"] || row["الفصل"] || row["كود الفصل"] || row["أسرة"] || row["الأسرة"]);
+                    const effectiveSyncKey = rowSyncKey || (
+                        (syncKey && syncKey !== 'MASTER_ACCESS' && syncKey !== 'ADMIN_MODE' && syncKey !== 'STAGE_ADMIN') ? syncKey : ''
+                    );
+
                     sanitizedRows.push({
                         excelRowNum,
                         childData: {
                             id: primaryKey,
                             name,
-                            syncKey: syncKey || "",
+                            syncKey: effectiveSyncKey,
                             phone: trimStr(row["phone"] || row["تليفون آخر"] || row["تليفون"] || row["الهاتف"]),
                             childPhone: trimStr(row["childPhone"] || row["تليفون المخدوم"]),
                             motherPhone: trimStr(row["motherPhone"] || row["تليفون الأم"]),
