@@ -15,7 +15,7 @@ For full, comprehensive details about the architecture, security isolation, scre
 
 ## 🛠️ Quick Start
 
-### 1. Prerequisites
+### 1. Prerequisites:
 Ensure you have [Node.js](https://nodejs.org/) installed.
 
 ### 2. Configuration
