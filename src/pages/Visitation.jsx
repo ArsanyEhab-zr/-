@@ -113,13 +113,13 @@ export default function Visitation() {
 
     const generateVisitationMsg = (child) => {
         const title = child.gender === 'بنت' ? 'مخدومتنا الجميلة' : 'مخدومنا الغالي';
-        const namePart = child.name ? child.name.split(' ')[0] : '';
+        const namePart = child.name ? child.name.split(' ').slice(0, 2).join(' ') : '';
         let msg = `أزيك يا ${title} ${namePart ? `(${namePart})` : ''}! 🌟\nعامل إيه؟ افتقدناك جداً وحابين نطمن عليك..`;
         return `https://api.whatsapp.com/send?phone=${cleanPhoneNumber(getTargetPhone(child))}&text=${encodeURIComponent(msg)}`;
     };
 
     const generateOnMyWayMsg = (child) => {
-        const namePart = child.name ? child.name.split(' ')[0] : '';
+        const namePart = child.name ? child.name.split(' ').slice(0, 2).join(' ') : '';
         let msg = `أزيك يا ${namePart ? `(${namePart})` : 'مخدوم'}! 🏃‍♂️\nأنا في طريقي ليك دلوقتي عشان أسلم عليك، جاهز؟`;
         return `https://api.whatsapp.com/send?phone=${cleanPhoneNumber(getTargetPhone(child))}&text=${encodeURIComponent(msg)}`;
     };
@@ -184,8 +184,8 @@ export default function Visitation() {
                                                     </div>
                                                     <div className={`w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-8 ${isSelected ? 'border-t-indigo-600' : (isVisitedRecently ? 'border-t-green-400 opacity-70' : 'border-t-white')}`}></div>
 
-                                                    <span className={`text-[10px] font-black mt-1 px-2.5 py-0.5 rounded-full shadow-sm transition-colors max-w-17.5 truncate ${isSelected ? 'bg-indigo-600 text-white' : 'bg-white text-slate-700 group-hover:bg-slate-100'}`}>
-                                                        {child.name ? child.name.split(' ')[0] : 'مخدوم'}
+                                                    <span className={`text-[10px] font-black mt-1 px-2 py-0.5 rounded-full shadow-sm transition-colors max-w-[100px] text-center truncate ${isSelected ? 'bg-indigo-600 text-white' : 'bg-white text-slate-700 group-hover:bg-slate-100'}`} title={child.name || ''}>
+                                                        {child.name ? child.name.split(' ').slice(0, 2).join(' ') : 'مخدوم'}
                                                     </span>
                                                 </button>
                                             </div>

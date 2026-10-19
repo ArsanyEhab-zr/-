@@ -22,6 +22,7 @@ import { generateChildId } from '../utils/idGenerator';
 import { safePurgeLocalChild } from '../db/sync';
 import { normalizeArabicName } from '../utils/nameUtils';
 import { compressImageToBase64, handleImageError } from '../utils/imageUtils';
+import SmartAlertsCard from '../components/SmartAlertsCard';
 
 const getSettings = () => {
     const defaults = {
@@ -212,6 +213,16 @@ export default function Dashboard() {
         return rawChildren.filter(c => String(c.syncKey || '').trim() === activeClassKey);
     }, [rawChildren, activeClassKey]);
 
+    // 🛡️ Data Scoping Rules for Smart Alerts:
+    // - Master Admin / Stage Admin: analyze children across ALL active classes loaded in DB
+    // - Standard Servant: ONLY analyze children belonging to their active class
+    const targetChildrenForAlerts = useMemo(() => {
+        if (isMaster) {
+            return (rawChildren || []).filter(c => !c.isDeleted);
+        }
+        return (scopedChildren || []).filter(c => !c.isDeleted);
+    }, [isMaster, rawChildren, scopedChildren]);
+
     // 🌟🌟🌟 زرعنا كود الطرد التلقائي هنا 🌟🌟🌟
     useEffect(() => {
         const verifyServantAccess = async () => {
@@ -347,6 +358,13 @@ export default function Dashboard() {
 
                 {currentView === 'menu' && (
                     <div className="animate-in fade-in zoom-in-95 duration-300">
+                        {/* 🔔 كارت التنبيهات الذكية والمتابعة الفورية القابل للطي */}
+                        <SmartAlertsCard
+                            isMaster={isMaster}
+                            allOsras={allOsras}
+                            activeClassKey={activeClassKey}
+                        />
+
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <button onClick={() => setCurrentView('stats')} className="bg-white p-6 rounded-[2.5rem] shadow-sm border-2 border-indigo-50 hover:border-indigo-200 transition-all flex flex-col items-center text-center group">
                                 <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><BarChart3 size={32} /></div>
