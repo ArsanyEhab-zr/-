@@ -4,6 +4,7 @@ import { db } from '../db/database';
 import { Link } from 'react-router-dom';
 import { Search, Phone, Info, ChevronLeft, Gift, Cake } from 'lucide-react';
 import BottomNav from '../components/BottomNav';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function InfoDirectory() {
     const [activeFilter, setActiveFilter] = useState("all");
@@ -149,7 +150,7 @@ export default function InfoDirectory() {
                                     {isBday && <div className="absolute top-0 left-0 w-full h-1.5 bg-linear-to-r from-yellow-400 via-pink-500 to-yellow-400 animate-pulse"></div>}
 
                                     <div className={`w-14 h-14 rounded-full flex items-center justify-center text-2xl overflow-hidden shadow-inner ${isBday ? 'bg-yellow-200 border-2 border-yellow-400' : 'bg-slate-100'}`}>
-                                        {child.profilePic ? <img src={child.profilePic} className="object-cover w-full h-full" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
+                                        {child.profilePic ? <img src={child.profilePic} onError={handleImageError} className="object-cover w-full h-full" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
                                     </div>
 
                                     <div className="flex-1">

@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Church, UserCheck, Users, Shield, Cloud, ChevronDown, ChevronUp, ArrowRight, User } from 'lucide-react';
 import { TENANT_CONFIG } from '../config/tenantConfig';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function ChurchHierarchy() {
     const [isOsrasOpen, setIsOsrasOpen] = useState(false);
@@ -79,6 +80,7 @@ export default function ChurchHierarchy() {
                             <img
                                 src={hierarchyData.mainService.logo}
                                 alt="Service Logo"
+                                onError={handleImageError}
                                 className="w-24 h-24 rounded-full border-4 border-slate-50 shadow-md mb-4 object-cover group-hover:scale-105 transition-transform"
                             />
                         ) : (

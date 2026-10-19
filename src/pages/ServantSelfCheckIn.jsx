@@ -3,6 +3,7 @@ import { ArrowRight, UserCheck, CheckCircle2, Check, Church, BookOpen, MapPin, S
 import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 import { firestore } from '../db/firebase';
 import { useNavigate } from 'react-router-dom';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function ServantSelfCheckIn() {
     const navigate = useNavigate();
@@ -161,7 +162,7 @@ export default function ServantSelfCheckIn() {
                         <h1 className="text-2xl font-black text-white">{record.name}</h1>
                     </div>
                     {currentServant.profileImage ? (
-                        <img src={currentServant.profileImage} alt={record.name} className="w-16 h-16 rounded-full object-cover border-2 border-indigo-400 shadow-md relative z-10" />
+                        <img src={currentServant.profileImage} alt={record.name} onError={handleImageError} className="w-16 h-16 rounded-full object-cover border-2 border-indigo-400 shadow-md relative z-10" />
                     ) : (
                         <div className="w-16 h-16 rounded-full bg-indigo-800 flex items-center justify-center text-indigo-300 relative z-10 border-2 border-indigo-500/30">
                             <span className="text-xl font-bold">{record.name.substring(0, 2)}</span>

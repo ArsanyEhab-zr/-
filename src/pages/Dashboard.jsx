@@ -852,24 +852,13 @@ function KidsManagerView({ childrenData, activeClassKey }) {
         if (file) {
             setIsCompressingImage(true);
             try {
-                // If online, try Cloudinary first; if offline or if Cloudinary fails, use compressed Base64
-                if (navigator.onLine) {
-                    try {
-                        const secure_url = await uploadImageToCloudinary(file, 'auto');
-                        setFormChild(prev => ({ ...prev, profilePic: secure_url }));
-                        alert("✅ تم رفع الصورة بنجاح!");
-                        return;
-                    } catch (cloudErr) {
-                        console.warn("Cloudinary upload failed, falling back to local base64:", cloudErr);
-                    }
+                const imageResult = await uploadImageToCloudinary(file, 'image');
+                if (imageResult) {
+                    setFormChild(prev => ({ ...prev, profilePic: imageResult }));
+                    alert(navigator.onLine && imageResult.startsWith('http') ? "✅ تم رفع الصورة بنجاح!" : "✅ تم حفظ الصورة بنجاح (وضع أوفلاين)!");
                 }
-
-                // Offline or fallback: compress to lightweight Base64 data URL
-                const base64Url = await compressImageToBase64(file);
-                setFormChild(prev => ({ ...prev, profilePic: base64Url }));
-                alert("✅ تم حفظ الصورة محلياً بنجاح (وضع أوفلاين)!");
             } catch (err) {
-                console.error(err);
+                console.error("Image upload error:", err);
                 alert("❌ فشل معالجة الصورة، حاول مرة تانية.");
             } finally {
                 setIsCompressingImage(false);

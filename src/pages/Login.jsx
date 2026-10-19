@@ -12,6 +12,7 @@ import { firestore } from '../db/firebase';
 import { db } from '../db/database';
 import { Capacitor } from '@capacitor/core';
 import { TENANT_CONFIG } from '../config/tenantConfig';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function Login() {
     const navigate = useNavigate();
@@ -168,7 +169,7 @@ export default function Login() {
                     <div className="flex flex-col items-center text-center mb-8">
                         <div className="w-24 h-24 rounded-full bg-transparent border-2 border-white/30 flex items-center justify-center p-2 mb-4 shadow-lg overflow-hidden">
                             {appSettings.khedmaLogo ? (
-                                <img src={appSettings.khedmaLogo} width="96" height="96" loading="eager" alt="لوجو الخدمة" className="w-full h-full object-contain rounded-full" />
+                                <img src={appSettings.khedmaLogo} width="96" height="96" loading="eager" alt="لوجو الخدمة" onError={handleImageError} className="w-full h-full object-contain rounded-full" />
                             ) : (
                                 <Church className="text-white w-12 h-12" />
                             )}

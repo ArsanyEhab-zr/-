@@ -43,8 +43,23 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,jpg,jpeg,woff2}'],
         runtimeCaching: [
           {
-            // Cache remote image CDNs (Cloudinary, Firebase Storage, Google User Content, Avatars)
-            urlPattern: /^https:\/\/(?:res\.cloudinary\.com|firebasestorage\.googleapis\.com|lh3\.googleusercontent\.com|api\.dicebear\.com)/i,
+            // Cache remote Cloudinary images with CacheFirst strategy for 100% offline access
+            urlPattern: /^https:\/\/res\.cloudinary\.com\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'cloudinary-images',
+              expiration: {
+                maxEntries: 1000,
+                maxAgeSeconds: 60 * 60 * 24 * 30 // 30 days
+              },
+              cacheableResponse: {
+                statuses: [0, 200]
+              }
+            }
+          },
+          {
+            // Cache other remote image CDNs (Firebase Storage, Google User Content, Avatars)
+            urlPattern: /^https:\/\/(?:firebasestorage\.googleapis\.com|lh3\.googleusercontent\.com|api\.dicebear\.com)/i,
             handler: 'CacheFirst',
             options: {
               cacheName: 'remote-images-cache',

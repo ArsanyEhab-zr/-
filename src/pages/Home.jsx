@@ -363,7 +363,7 @@ export default function Home() {
                 <div className="relative flex flex-col items-center animate-in fade-in zoom-in duration-700">
                     <div className="w-32 h-32 mb-8 relative">
                         <div className="absolute inset-0 bg-amber-400 rounded-full blur-2xl opacity-20 animate-pulse"></div>
-                        <img src="/logo.png" alt="Koinonia Logo" className="w-full h-full object-contain relative z-10 drop-shadow-2xl" onError={(e) => { e.target.style.display = 'none' }} />
+                        <img src="/logo.png" alt="Koinonia Logo" className="w-full h-full object-contain relative z-10 drop-shadow-2xl" onError={handleImageError} />
                     </div>
                     <h1 className="text-3xl font-black text-white mb-2 tracking-wide">كينـونـيـا</h1>
                     <p className="text-indigo-200/80 font-medium text-sm mb-8 animate-pulse">جاري تحميل البيانات...</p>

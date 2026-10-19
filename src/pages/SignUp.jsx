@@ -4,6 +4,7 @@ import { doc, getDoc, collection, addDoc, serverTimestamp } from 'firebase/fires
 import { firestore } from '../db/firebase';
 import { ShieldCheck, UserPlus, Loader2, Phone, Lock, User, Layers, ImagePlus } from 'lucide-react';
 import { uploadImageToCloudinary } from '../utils/cloudinary';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function SignUp() {
     const navigate = useNavigate();
@@ -105,7 +106,7 @@ export default function SignUp() {
                         <div className="relative bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col items-center justify-center gap-3">
                             {formData.profileImage ? (
                                 <div className="relative w-20 h-20">
-                                    <img src={formData.profileImage} alt="Profile" className="w-full h-full rounded-full object-cover border-2 border-indigo-500 shadow-md" />
+                                    <img src={formData.profileImage} alt="Profile" onError={handleImageError} className="w-full h-full rounded-full object-cover border-2 border-indigo-500 shadow-md" />
                                 </div>
                             ) : (
                                 <div className="w-16 h-16 rounded-full bg-slate-200 flex items-center justify-center text-slate-400">

@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom';
 import { Search, MapPin, ClipboardList, Navigation, MessageCircleWarning, CheckCircle2, Map, Crosshair, MapPinned, Loader2, AlertTriangle, Mic } from 'lucide-react';
 import BottomNav from '../components/BottomNav';
 import useAutoSync from '../hooks/useAutoSync';
+import { handleImageError } from '../utils/imageUtils';
 
 export default function Visitation() {
     const { triggerAutoSync } = useAutoSync();
@@ -180,7 +181,7 @@ export default function Visitation() {
                                                     {isVisitedRecently && <span className="absolute -top-1 -left-1 z-10 bg-green-500 text-white rounded-full p-0.5 shadow-sm"><CheckCircle2 size={12} /></span>}
 
                                                     <div className={`w-14 h-14 rounded-full border-4 ${isSelected ? 'border-indigo-600 shadow-xl shadow-indigo-500/40' : (isVisitedRecently ? 'border-green-400 opacity-70' : 'border-white shadow-md')} overflow-hidden bg-slate-100 flex items-center justify-center text-xl`}>
-                                                        {child.profilePic ? <img src={child.profilePic} width="56" height="56" loading="lazy" className="w-full h-full object-cover" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
+                                                        {child.profilePic ? <img src={child.profilePic} width="56" height="56" loading="lazy" onError={handleImageError} className="w-full h-full object-cover" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
                                                     </div>
                                                     <div className={`w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-8 ${isSelected ? 'border-t-indigo-600' : (isVisitedRecently ? 'border-t-green-400 opacity-70' : 'border-t-white')}`}></div>
 
