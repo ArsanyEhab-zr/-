@@ -6,7 +6,6 @@ import { collection, collectionGroup, onSnapshot } from 'firebase/firestore';
 import { decryptData } from '../encryption';
 import { ensureCleanChildId, isCleanChildId } from '../utils/idGenerator';
 import { normalizeArabicName } from '../utils/nameUtils';
-import { safePurgeLocalChild } from '../db/sync';
 
 /**
  * 🔄 useRealtimeChildren — Global Real-time Firestore Listener
@@ -24,6 +23,7 @@ export default function useRealtimeChildren() {
     const activeSubKeyRef = useRef(null);
     const unsubsRef = useRef([]);
     const isProcessingRef = useRef(false);
+    const isPurging = useRef(false);
 
     useEffect(() => {
         const currentSyncKey = localStorage.getItem('currentSyncKey');
@@ -56,7 +56,7 @@ export default function useRealtimeChildren() {
          * Process Firestore snapshot changes and strictly reconcile with local Dexie database
          */
         const handleSnapshot = async (snapshot, targetClassKey = null) => {
-            if (!snapshot || isProcessingRef.current) return;
+            if (!snapshot || isProcessingRef.current || isPurging.current) return;
             isProcessingRef.current = true;
 
             try {
@@ -130,56 +130,82 @@ export default function useRealtimeChildren() {
                     }
                 }
 
-                // 3. Strict Cloud-to-Local Reconciliation Check
-                // Scoped query for local children
-                let localScopedChildren = [];
-                if (targetClassKey) {
-                    localScopedChildren = await db.children.where('syncKey').equals(targetClassKey).toArray();
-                } else if (!isMaster && !isStageAdmin) {
-                    localScopedChildren = await db.children.where('syncKey').equals(currentSyncKey).toArray();
-                } else if (isMaster) {
-                    localScopedChildren = await db.children.toArray();
-                }
-
-                for (const localChild of localScopedChildren) {
-                    const localIdStr = String(localChild.id);
-
-                    // a. Mark deleted records for purge
-                    if (localChild.isDeleted) {
-                        toDeleteIds.add(localChild.id);
-                        continue;
+                // 3. Strict Cloud-to-Local Reconciliation Check & Batch Deduplication
+                if (isPurging.current) return;
+                isPurging.current = true;
+                try {
+                    // Scoped query for local children
+                    let localScopedChildren = [];
+                    if (targetClassKey) {
+                        localScopedChildren = await db.children.where('syncKey').equals(targetClassKey).toArray();
+                    } else if (!isMaster && !isStageAdmin) {
+                        localScopedChildren = await db.children.where('syncKey').equals(currentSyncKey).toArray();
+                    } else if (isMaster) {
+                        localScopedChildren = await db.children.toArray();
                     }
 
-                    // b. Duplicate Name Safeguard:
-                    // If local record shares the same normalized name with a cloud record
-                    // but has a different/legacy ID, it is an obsolete duplicate!
-                    const normLocalName = normalizeArabicName(localChild.name);
-                    if (normLocalName && cloudNameMap.has(normLocalName)) {
-                        const canonicalId = cloudNameMap.get(normLocalName);
-                        if (localIdStr !== canonicalId && String(localChild.id) !== canonicalId) {
-                            console.log(`🧹 [RealtimeSync] Purging duplicate local child "${localChild.name}" (old ID: ${localChild.id}, canonical: ${canonicalId})`);
+                    for (const localChild of localScopedChildren) {
+                        const localIdStr = String(localChild.id);
+
+                        // a. Mark deleted records for purge
+                        if (localChild.isDeleted) {
                             toDeleteIds.add(localChild.id);
                             continue;
                         }
-                    }
 
-                    // c. Ghost / Cloud-Deleted Safeguard:
-                    // If local record is NOT in cloud snapshot:
-                    if (!cloudDocIds.has(localIdStr) && !cloudDocIds.has(String(localChild.id))) {
-                        // Is this a genuinely new offline record?
-                        const isFreshOffline = localChild.isDirty && !localChild.isDeleted && isCleanChildId(localChild.id);
-                        if (!isFreshOffline) {
-                            console.log(`🗑️ [RealtimeSync] Purging cloud-deleted/ghost local record "${localChild.name}" (ID: ${localChild.id})`);
-                            toDeleteIds.add(localChild.id);
+                        // b. Duplicate Name Safeguard:
+                        // If local record shares the same normalized name with a cloud record
+                        // but has a different/legacy ID, it is an obsolete duplicate!
+                        const normLocalName = normalizeArabicName(localChild.name);
+                        if (normLocalName && cloudNameMap.has(normLocalName)) {
+                            const canonicalId = cloudNameMap.get(normLocalName);
+                            if (localIdStr !== canonicalId && String(localChild.id) !== canonicalId) {
+                                toDeleteIds.add(localChild.id);
+                                continue;
+                            }
+                        }
+
+                        // c. Ghost / Cloud-Deleted Safeguard:
+                        // If local record is NOT in cloud snapshot:
+                        if (!cloudDocIds.has(localIdStr) && !cloudDocIds.has(String(localChild.id))) {
+                            // Is this a genuinely new offline record?
+                            const isFreshOffline = localChild.isDirty && !localChild.isDeleted && isCleanChildId(localChild.id);
+                            if (!isFreshOffline) {
+                                toDeleteIds.add(localChild.id);
+                            }
                         }
                     }
-                }
 
-                // 4. Execute deletions in Dexie
-                if (toDeleteIds.size > 0) {
-                    for (const delId of toDeleteIds) {
-                        await safePurgeLocalChild(delId);
+                    // 4. Batch Deletions in Dexie
+                    if (toDeleteIds.size > 0) {
+                        const rawIdsToDelete = Array.from(toDeleteIds);
+                        const keysToDeleteSet = new Set();
+                        rawIdsToDelete.forEach(id => {
+                            if (id !== undefined && id !== null) {
+                                keysToDeleteSet.add(id);
+                                const num = Number(id);
+                                if (!isNaN(num) && Number.isFinite(num)) {
+                                    keysToDeleteSet.add(num);
+                                }
+                            }
+                        });
+                        const keysToDelete = Array.from(keysToDeleteSet);
+
+                        if (keysToDelete.length > 0) {
+                            await db.children.bulkDelete(keysToDelete);
+
+                            // Clean up associated attendance & grades in batch
+                            try {
+                                const strKeys = rawIdsToDelete.map(String);
+                                await db.attendance.where('childId').anyOf(strKeys).delete();
+                                await db.grades.where('childId').anyOf(strKeys).delete();
+                            } catch (_) {}
+
+                            console.log(`[RealtimeSync] Purged ${rawIdsToDelete.length} duplicates`);
+                        }
                     }
+                } finally {
+                    isPurging.current = false;
                 }
 
                 // 5. Bulk put updated/added children
