@@ -1,5 +1,5 @@
 /* eslint-disable no-unused-vars */
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { uploadImageToCloudinary } from '../utils/cloudinary';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
@@ -44,13 +44,122 @@ export default function Dashboard() {
     const [currentView, setCurrentView] = useState('menu');
     const [appSettings, setAppSettings] = useState(getSettings());
     const currentSyncKey = localStorage.getItem('currentSyncKey');
-    const isMaster = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE' || currentSyncKey === 'STAGE_ADMIN';
+    const currentServantObj = useMemo(() => {
+        try {
+            return JSON.parse(localStorage.getItem('currentServant') || '{}');
+        } catch (e) {
+            return {};
+        }
+    }, []);
+    const isMaster = currentSyncKey === 'MASTER_ACCESS' || 
+                     currentSyncKey === 'ADMIN_MODE' || 
+                     currentSyncKey === 'STAGE_ADMIN' ||
+                     currentServantObj.role === 'أدمن مساعد' ||
+                     currentServantObj.role === 'كاهن' ||
+                     currentServantObj.role === 'Super Admin';
     
     // 🔥 تعريفات سحب الداتا السحابية والمحلية
-    const currentServantObj = JSON.parse(localStorage.getItem('currentServant') || '{}');
     const allowedClasses = currentServantObj.allowedClasses || [];
 
-    const children = useLiveQuery(async () => {
+    // All Osras from appSettings for dropdown selection
+    const allOsras = useMemo(() => {
+        const list = [];
+        (appSettings.services || []).forEach(srv => {
+            (srv.osras || []).forEach(osra => {
+                if (osra.syncKey) {
+                    list.push({
+                        name: osra.name,
+                        syncKey: String(osra.syncKey).trim(),
+                        stage: srv.name
+                    });
+                }
+            });
+        });
+        return list;
+    }, [appSettings]);
+
+    // Active class filter state for Admins (determines activeClassKey)
+    const [selectedAdminClass, setSelectedAdminClass] = useState(() => {
+        return sessionStorage.getItem('dashboard_admin_class_filter') ||
+               sessionStorage.getItem('master_osraKey') ||
+               localStorage.getItem('selectedOsraSyncKey') ||
+               localStorage.getItem('impersonatedOsra') ||
+               localStorage.getItem('selectedOsra') ||
+               '';
+    });
+
+    const handleAdminClassChange = (newKey) => {
+        setSelectedAdminClass(newKey);
+        if (newKey) {
+            sessionStorage.setItem('dashboard_admin_class_filter', newKey);
+            localStorage.setItem('selectedOsraSyncKey', newKey);
+        } else {
+            sessionStorage.removeItem('dashboard_admin_class_filter');
+            localStorage.removeItem('selectedOsraSyncKey');
+        }
+    };
+
+    const activeClassKey = useMemo(() => {
+        if (!isMaster) {
+            return String(currentSyncKey || '').trim();
+        }
+        if (selectedAdminClass && selectedAdminClass !== 'ALL_CHURCH') {
+            return String(selectedAdminClass).trim();
+        }
+        const fallback = sessionStorage.getItem('master_osraKey') || localStorage.getItem('selectedOsraSyncKey') || '';
+        if (fallback && fallback !== 'ALL_CHURCH') return String(fallback).trim();
+        return '';
+    }, [isMaster, currentSyncKey, selectedAdminClass]);
+
+    // 🧹 Physical purge of any duplicate attendance rows in db.attendance on mount
+    useEffect(() => {
+        const purgeDuplicateAttendance = async () => {
+            try {
+                const allRecords = await db.attendance.toArray();
+                if (!allRecords || allRecords.length === 0) return;
+
+                const groups = new Map();
+                for (const rec of allRecords) {
+                    if (!rec || !rec.date || !rec.childId) continue;
+                    const cleanDate = String(rec.date).trim();
+                    const cleanChildId = String(rec.childId).trim();
+                    const cleanType = String(rec.type || 'service').trim().toLowerCase();
+                    const key = `${cleanDate}_${cleanChildId}_${cleanType}`;
+
+                    if (!groups.has(key)) {
+                        groups.set(key, []);
+                    }
+                    groups.get(key).push(rec);
+                }
+
+                const idsToDelete = [];
+                for (const [, records] of groups.entries()) {
+                    if (records.length > 1) {
+                        records.sort((a, b) => {
+                            const timeA = new Date(a.updatedAt || 0).getTime();
+                            const timeB = new Date(b.updatedAt || 0).getTime();
+                            if (timeB !== timeA) return timeB - timeA;
+                            return String(b.id || '').localeCompare(String(a.id || ''));
+                        });
+                        for (let i = 1; i < records.length; i++) {
+                            idsToDelete.push(records[i].id);
+                        }
+                    }
+                }
+
+                if (idsToDelete.length > 0) {
+                    console.log(`[Dashboard] 🧹 Purged ${idsToDelete.length} duplicate attendance rows from Dexie.`);
+                    await db.attendance.bulkDelete(idsToDelete);
+                }
+            } catch (err) {
+                console.error("[Dashboard] Error purging duplicate attendance:", err);
+            }
+        };
+
+        purgeDuplicateAttendance();
+    }, []);
+
+    const rawChildren = useLiveQuery(async () => {
         let rawKids = [];
         if (currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE') {
             rawKids = await db.children.toArray();
@@ -93,10 +202,15 @@ export default function Dashboard() {
         }
 
         return dedupedKids;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [currentSyncKey]);
 
-    // 🌟 currentSyncKey and isMaster are already defined above with the children query
+    const scopedChildren = useMemo(() => {
+        if (!rawChildren) return [];
+        if (!activeClassKey || activeClassKey === 'ALL_CHURCH') {
+            return rawChildren;
+        }
+        return rawChildren.filter(c => String(c.syncKey || '').trim() === activeClassKey);
+    }, [rawChildren, activeClassKey]);
 
     // 🌟🌟🌟 زرعنا كود الطرد التلقائي هنا 🌟🌟🌟
     useEffect(() => {
@@ -148,7 +262,7 @@ export default function Dashboard() {
     }, []);
     // 🌟🌟🌟 نهاية كود الطرد 🌟🌟🌟
 
-    if (!children) return (
+    if (!rawChildren) return (
         <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center font-bold text-slate-400 gap-3">
             <Loader2 className="animate-spin text-indigo-500 w-10 h-10" /> جاري تحميل غرفة الإدارة...
         </div>
@@ -194,7 +308,7 @@ export default function Dashboard() {
                                     {isMaster ? 'لوحة الإدارة المركزية' : dynamicTitle}
                                 </h1>
                                 <p className="text-xs font-bold text-slate-300">
-                                    {isMaster ? 'لوحة تحكم الأدمن' : currentView === 'menu' ? 'غرفة الإدارة' :
+                                    {isMaster ? (activeClassKey ? `لوحة تحكم الأدمن (${scopedChildren.length} مخدوم)` : 'لوحة تحكم الأدمن (عام)') : currentView === 'menu' ? 'غرفة الإدارة' :
                                         currentView === 'stats' ? 'الإحصائيات والداتا' :
                                             currentView === 'kids' ? 'مرايا المخدومين' : 'إخوة الرب'}
                                 </p>
@@ -205,6 +319,32 @@ export default function Dashboard() {
             </header>
 
             <main className="p-4 max-w-4xl mx-auto mt-4">
+                {isMaster && allOsras.length > 0 && (
+                    <div className="bg-white p-4 rounded-2xl shadow-sm border border-indigo-100 mb-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+                        <div className="flex items-center gap-2 text-xs font-black text-slate-700">
+                            <Users className="text-indigo-600 w-4 h-4 shrink-0" />
+                            <span>تحديد الفصل / الأسرة:</span>
+                            {activeClassKey && (
+                                <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-md text-[10px] font-bold">
+                                    ({scopedChildren.length} مخدوم)
+                                </span>
+                            )}
+                        </div>
+                        <select
+                            value={selectedAdminClass || ''}
+                            onChange={(e) => handleAdminClassChange(e.target.value)}
+                            className="w-full sm:w-auto px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black text-indigo-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        >
+                            <option value="">جميع الفصول (عام)</option>
+                            {allOsras.map((osra) => (
+                                <option key={osra.syncKey} value={osra.syncKey}>
+                                    {osra.stage ? `${osra.stage} - ` : ''}{osra.name}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                )}
+
                 {currentView === 'menu' && (
                     <div className="animate-in fade-in zoom-in-95 duration-300">
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -231,15 +371,12 @@ export default function Dashboard() {
                                 </>
                             )}
 
-                            {/* 🌟 إخفاء مرايا المخدومين والذكاء الاصطناعي عن الأدمن/الكاهن */}
-                            {!isMaster && (
-                                <button onClick={() => setCurrentView('kids')} className="bg-white p-6 rounded-[2.5rem] shadow-sm border-2 border-blue-50 hover:border-blue-200 transition-all flex flex-col items-center text-center group">
-                                    <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Users size={32} /></div>
-                                    <h2 className="text-xl font-black text-slate-800">مرايا المخدومين</h2>
-                                    <p className="text-xs font-bold text-slate-500 mt-1">إضافة مخدومين، وتعديل كل البيانات الشاملة</p>
-                                </button>
-                            )}
-
+                            {/* 🌟 مرايا المخدومين */}
+                            <button onClick={() => setCurrentView('kids')} className="bg-white p-6 rounded-[2.5rem] shadow-sm border-2 border-blue-50 hover:border-blue-200 transition-all flex flex-col items-center text-center group">
+                                <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Users size={32} /></div>
+                                <h2 className="text-xl font-black text-slate-800">مرايا المخدومين</h2>
+                                <p className="text-xs font-bold text-slate-500 mt-1">إضافة مخدومين، وتعديل كل البيانات الشاملة</p>
+                            </button>
 
                         </div>
 
@@ -256,8 +393,8 @@ export default function Dashboard() {
                     </div>
                 )}
 
-                {currentView === 'stats' && <StatsView childrenData={children} appSettings={appSettings} />}
-                {currentView === 'kids' && !isMaster && <KidsManagerView childrenData={children} />}
+                {currentView === 'stats' && <StatsView childrenData={scopedChildren} appSettings={appSettings} activeClassKey={activeClassKey} />}
+                {currentView === 'kids' && <KidsManagerView childrenData={scopedChildren} activeClassKey={activeClassKey} />}
 
 
             </main>
@@ -271,7 +408,7 @@ export default function Dashboard() {
 // ══════════════════════════════════════════════════════════════════════════════════════
 // 1️⃣ الإحصائيات (Advanced Analytics Dashboard)
 // ══════════════════════════════════════════════════════════════════════════════════════
-function StatsView({ childrenData, appSettings }) {
+function StatsView({ childrenData, appSettings, activeClassKey }) {
     const { triggerAutoSync } = useAutoSync();
     const total = childrenData.length;
     const boys = childrenData.filter(c => c.gender !== 'بنت').length;
@@ -281,25 +418,42 @@ function StatsView({ childrenData, appSettings }) {
     const currentYear = new Date().getFullYear();
     const currentMonthPrefix = `${currentYear}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
     
-    // 🌟 جلب داتا الغياب لشهر الحالي عشان نرسم بيها الإحصائيات — مع فلترة دقيقة بالـ syncKey وحذف المكرر
-    const childIdSet = useMemo(() => new Set(childrenData.map(c => String(c.id))), [childrenData]);
+    // 🛡️ Strict Set of valid child IDs for the current scoped children list
+    const validChildIds = useMemo(() => 
+        new Set((childrenData || []).filter(c => !c.isDeleted).map(c => String(c.id).trim())),
+        [childrenData]
+    );
 
     const attendanceData = useLiveQuery(async () => {
         const rawAtt = await db.attendance
             .filter(a => a.date && a.date.startsWith(currentYear.toString()) && !a.isDeleted)
             .toArray();
         
-        // Deduplicate by composite key: date_childId_type (keep the latest by updatedAt)
+        // Filter strictly to valid children in current scope & activeClassKey (if present)
+        const scopedRaw = rawAtt.filter(rec => {
+            if (!rec || rec.isDeleted || rec.status === 'absent') return false;
+            const recChildId = String(rec.childId || '').trim();
+            if (!validChildIds.has(recChildId)) return false;
+            if (activeClassKey && rec.syncKey && String(rec.syncKey).trim() !== activeClassKey) {
+                return false;
+            }
+            return true;
+        });
+
+        // Deduplicate in memory by composite key: cleanDate_cleanChildId_cleanType (keep latest by updatedAt)
         const bestByKey = new Map();
-        for (const record of rawAtt) {
-            const compositeKey = `${record.date}_${record.childId}_${record.type}`;
+        for (const record of scopedRaw) {
+            const cleanDate = String(record.date).trim();
+            const cleanChildId = String(record.childId).trim();
+            const cleanType = String(record.type || 'service').trim().toLowerCase();
+            const compositeKey = `${cleanDate}_${cleanChildId}_${cleanType}`;
             const existing = bestByKey.get(compositeKey);
             if (!existing || (record.updatedAt || '') > (existing.updatedAt || '')) {
                 bestByKey.set(compositeKey, record);
             }
         }
         return Array.from(bestByKey.values());
-    }, [currentYear]) || [];
+    }, [currentYear, validChildIds, activeClassKey]) || [];
 
     // ─── 📊 1. حساب إحصائيات الحضور لجُمع الشهر الحالي ───
     const getFridaysOfCurrentMonth = () => {
@@ -321,16 +475,25 @@ function StatsView({ childrenData, appSettings }) {
 
     const monthFridays = getFridaysOfCurrentMonth();
 
-    // 🛡️ Scope attendance counts to ONLY children in this class (eliminates 44→88 cross-class inflation)
-    const scopedAttendance = useMemo(() => 
-        attendanceData.filter(a => childIdSet.has(String(a.childId))),
-        [attendanceData, childIdSet]
-    );
+    // 🛡️ Strict unique count per Friday and type using a Set
+    const getUniqueAttendanceCount = (dateStr, typeStr) => {
+        const matched = new Set();
+        const targetType = String(typeStr || 'service').trim().toLowerCase();
+        for (const rec of attendanceData) {
+            if (rec.isDeleted || rec.status === 'absent') continue;
+            const recType = String(rec.type || 'service').trim().toLowerCase();
+            const recChildId = String(rec.childId).trim();
+            if (rec.date === dateStr && recType === targetType && validChildIds.has(recChildId)) {
+                matched.add(recChildId);
+            }
+        }
+        return matched.size;
+    };
 
     const attendanceStats = monthFridays.map((friday, index) => {
-        const serviceCount = scopedAttendance.filter(a => a.date === friday && a.type === 'service').length;
-        const liturgyCount = scopedAttendance.filter(a => a.date === friday && a.type === 'liturgy').length;
-        const tasbehaCount = scopedAttendance.filter(a => a.date === friday && a.type === 'tasbeha').length;
+        const serviceCount = getUniqueAttendanceCount(friday, 'service');
+        const liturgyCount = getUniqueAttendanceCount(friday, 'liturgy');
+        const tasbehaCount = getUniqueAttendanceCount(friday, 'tasbeha');
         return {
             date: friday,
             label: `الجمعة ${index + 1}`,
@@ -379,11 +542,17 @@ function StatsView({ childrenData, appSettings }) {
             // حساب العمر
             const calculatedAge = calculateExactAge(c.birthDate);
 
-            // حساب الحضور — باستخدام الداتا المفلترة والمنقحة من التكرار
-            const childAtt = scopedAttendance.filter(a => String(a.childId) === String(c.id));
-            const totalService = childAtt.filter(a => a.type === 'service').length;
-            const totalLiturgy = childAtt.filter(a => a.type === 'liturgy').length;
-            const totalTasbeha = childAtt.filter(a => a.type === 'tasbeha').length;
+            // حساب الحضور — باستخدام الداتا المفلترة والمنقحة من التكرار عبر Set
+            const strId = String(c.id).trim();
+            const childRecords = attendanceData.filter(a => String(a.childId).trim() === strId && !a.isDeleted && a.status !== 'absent');
+            
+            const serviceDates = new Set(childRecords.filter(a => String(a.type || 'service').trim().toLowerCase() === 'service').map(a => a.date));
+            const liturgyDates = new Set(childRecords.filter(a => String(a.type || '').trim().toLowerCase() === 'liturgy').map(a => a.date));
+            const tasbehaDates = new Set(childRecords.filter(a => String(a.type || '').trim().toLowerCase() === 'tasbeha').map(a => a.date));
+
+            const totalService = serviceDates.size;
+            const totalLiturgy = liturgyDates.size;
+            const totalTasbeha = tasbehaDates.size;
 
             return {
                 "م": c.id,
@@ -459,9 +628,9 @@ function StatsView({ childrenData, appSettings }) {
                     await Promise.all(updates);
                     
                     // 🪦 Soft-delete scoped attendance
-                    const childIds = childrenData.map(c => c.id);
+                    const childIds = new Set(childrenData.map(c => String(c.id).trim()));
                     const allAtt = await db.attendance.toArray();
-                    const scopedAtt = allAtt.filter(a => childIds.includes(a.childId));
+                    const scopedAtt = allAtt.filter(a => childIds.has(String(a.childId).trim()));
                     const attUpdates = scopedAtt.map(a => db.attendance.update(a.id, { isDeleted: true, isDirty: true, updatedAt: now }));
                     await Promise.all(attUpdates);
                     
@@ -621,7 +790,7 @@ function StatsView({ childrenData, appSettings }) {
     );
 }
 
-function KidsManagerView({ childrenData }) {
+function KidsManagerView({ childrenData, activeClassKey }) {
     const { triggerAutoSync } = useAutoSync();
     const [search, setSearch] = useState("");
     const [genderFilter, setGenderFilter] = useState("all");
@@ -708,7 +877,7 @@ function KidsManagerView({ childrenData }) {
         const currentSyncKey = localStorage.getItem('currentSyncKey');
         const targetSyncKey = (editingChild?.syncKey && editingChild.syncKey !== 'MASTER_ACCESS' && editingChild.syncKey !== 'ADMIN_MODE')
             ? editingChild.syncKey
-            : ((currentSyncKey && currentSyncKey !== 'MASTER_ACCESS' && currentSyncKey !== 'ADMIN_MODE') ? currentSyncKey : (formChild.syncKey || ''));
+            : (activeClassKey || ((currentSyncKey && currentSyncKey !== 'MASTER_ACCESS' && currentSyncKey !== 'ADMIN_MODE') ? currentSyncKey : (formChild.syncKey || '')));
 
         const childDataToSave = { ...formChild, birthMonth: bMonth, isDirty: true, updatedAt: now, isDeleted: false, syncKey: targetSyncKey };
 

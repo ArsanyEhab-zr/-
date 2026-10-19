@@ -22,8 +22,10 @@ export const analytics = getAnalytics(app);
 
 // 4. 🌟 تشغيل وتصدير قاعدة البيانات بالاسمين عشان نرضي كل ملفات المشروع!
 // 🌟 تفعيل قاعدة البيانات الأوفلاين (Offline Persistence) بشكل آمن - Modern V9+ API
+// 🛡️ تفعيل experimentalAutoDetectLongPolling لمنع انهيار قنوات الاستماع بـ ERR_QUIC_PROTOCOL_ERROR.QUIC_TOO_MANY_RTOS
 export const db = initializeFirestore(app, {
-    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+    experimentalAutoDetectLongPolling: true
 });
 
 // 🧹 مسح الكاش بالكامل في حالة وجود داتا مشفرة قديمة
