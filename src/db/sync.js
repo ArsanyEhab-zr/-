@@ -5,8 +5,12 @@ import { collection, collectionGroup, getDocs, doc, setDoc, deleteDoc, getDoc, g
 // 🌟 استدعاء دوال التشفير وفك التشفير اللي عملناهم
 import { encryptData, decryptData } from '../encryption';
 import { runIdMigration } from './migration';
-import { ensureCleanChildId } from '../utils/idGenerator';
+import { ensureCleanChildId, isCleanChildId } from '../utils/idGenerator';
 import { normalizeArabicName } from '../utils/nameUtils';
+
+// 🔒 Global sync mutex promise locks to guarantee single execution
+let activeSyncPromise = null;
+let activeReconcilePromise = null;
 
 // 🧹 فلتر سحري لتنظيف الداتا (أسرع من السرياليزيشن)
 const cleanData = (obj) => {
@@ -107,14 +111,215 @@ export const processCloudDoc = (docSnap) => {
 };
 
 /**
+ * 🛡️ Permanently deduplicates a list of cloud children documents for a specific class (Osra).
+ * Groups by normalized Arabic name. If duplicates exist, picks ONE deterministic canonical winner,
+ * permanently deletes loser documents from Firestore, migrates all attendance & grades
+ * (both in Firestore and in local Dexie) from loser IDs to winner ID, and safely purges losers locally.
+ * 
+ * @param {string} syncKey - The Osra syncKey
+ * @param {Array<object>} rawCloudChildren - Array of child objects from Firestore
+ * @returns {Promise<{ canonicalChildren: Array<object>, purgedCount: number }>}
+ */
+export async function deduplicateCloudChildrenForClass(syncKey, rawCloudChildren = []) {
+    if (!syncKey || !rawCloudChildren || rawCloudChildren.length === 0) {
+        return { canonicalChildren: rawCloudChildren || [], purgedCount: 0 };
+    }
+
+    const classKey = String(syncKey).trim();
+    const now = new Date().toISOString();
+
+    // 1. Group by normalized Arabic name
+    const nameGroups = new Map(); // normName -> [child1, child2, ...]
+    const nonNamedChildren = [];
+
+    for (const rawChild of rawCloudChildren) {
+        if (!rawChild || rawChild.id === '_placeholder' || rawChild.isPlaceholder) continue;
+        const cleanId = ensureCleanChildId(rawChild.id, rawChild.gender);
+        const child = { ...rawChild, id: cleanId, _rawId: rawChild.id };
+        const normName = normalizeArabicName(child.name);
+        if (!normName) {
+            nonNamedChildren.push(child);
+            continue;
+        }
+        if (!nameGroups.has(normName)) {
+            nameGroups.set(normName, []);
+        }
+        nameGroups.get(normName).push(child);
+    }
+
+    // 2. Identify winners and losers deterministically
+    const canonicalChildren = [...nonNamedChildren];
+    const loserToWinnerMap = new Map(); // loserId -> winnerId
+    const losersToDelete = []; // array of { id, rawId }
+
+    for (const [normName, group] of nameGroups.entries()) {
+        if (group.length === 1) {
+            canonicalChildren.push(group[0]);
+            continue;
+        }
+
+        // Deterministically pick ONE winner
+        const sorted = [...group].sort((a, b) => {
+            // a. Prefer non-deleted
+            if (a.isDeleted !== b.isDeleted) return a.isDeleted ? 1 : -1;
+            // b. Prefer clean structured ID format
+            const aClean = isCleanChildId(a.id);
+            const bClean = isCleanChildId(b.id);
+            if (aClean !== bClean) return aClean ? -1 : 1;
+            // c. Prefer latest updatedAt
+            const aTime = a.updatedAt || '';
+            const bTime = b.updatedAt || '';
+            if (aTime !== bTime) return bTime.localeCompare(aTime);
+            // d. Deterministic fallback by ID (localeCompare descending)
+            return String(b.id || '').localeCompare(String(a.id || ''));
+        });
+
+        const winner = sorted[0];
+        canonicalChildren.push(winner);
+
+        const winnerId = String(winner.id);
+        for (let i = 1; i < sorted.length; i++) {
+            const loser = sorted[i];
+            const loserId = String(loser.id);
+            if (loserId !== winnerId) {
+                loserToWinnerMap.set(loserId, winnerId);
+                losersToDelete.push({ id: loserId, rawId: loser._rawId || loser.id });
+            }
+        }
+    }
+
+    if (loserToWinnerMap.size === 0) {
+        return { canonicalChildren, purgedCount: 0 };
+    }
+
+    console.log(`🧹 [Deduplication] Permanently resolving ${loserToWinnerMap.size} duplicate cloud children in ${classKey}...`);
+
+    // 3. Permanently delete duplicate loser documents from Firestore
+    if (navigator.onLine) {
+        try {
+            await Promise.all(losersToDelete.map(async loser => {
+                try {
+                    await deleteDoc(doc(firestore, 'Osras', classKey, 'children', String(loser.id)));
+                    if (loser.rawId && String(loser.rawId) !== String(loser.id)) {
+                        await deleteDoc(doc(firestore, 'Osras', classKey, 'children', String(loser.rawId)));
+                    }
+                } catch (delErr) {
+                    console.warn(`⚠️ Failed deleting duplicate cloud child doc ${loser.id}:`, delErr?.message);
+                }
+            }));
+        } catch (delErr) {
+            console.warn(`⚠️ Cloud delete duplicate children warning:`, delErr?.message);
+        }
+
+        // 4. Migrate cloud attendance references in Firestore
+        try {
+            const attSnap = await getDocs(collection(firestore, 'Osras', classKey, 'attendance'));
+            for (const aDoc of (attSnap.docs || [])) {
+                if (aDoc.id === '_placeholder') continue;
+                const rawAtt = aDoc.data();
+                let attData = rawAtt?.payload ? decryptData(rawAtt.payload) : rawAtt;
+                if (!attData) continue;
+
+                const cId = String(attData.childId || '');
+                let matchedWinnerId = loserToWinnerMap.get(cId);
+
+                if (!matchedWinnerId) {
+                    for (const [loserId, wId] of loserToWinnerMap.entries()) {
+                        if (aDoc.id.includes(`_${loserId}_`)) {
+                            matchedWinnerId = wId;
+                            break;
+                        }
+                    }
+                }
+
+                if (matchedWinnerId) {
+                    const newAttDocId = `${attData.date}_${matchedWinnerId}_${attData.type}`;
+                    const updatedAtt = {
+                        ...attData,
+                        childId: matchedWinnerId,
+                        syncKey: classKey,
+                        isDirty: false,
+                        isDeleted: false,
+                        updatedAt: now
+                    };
+                    const newAttRef = doc(firestore, 'Osras', classKey, 'attendance', newAttDocId);
+                    await setDoc(newAttRef, { payload: encryptData(cleanData(updatedAtt)) }, { merge: true });
+                    try {
+                        await deleteDoc(aDoc.ref);
+                    } catch (_) {}
+                }
+            }
+        } catch (attMigErr) {
+            console.warn(`⚠️ Cloud attendance migration warning in ${classKey}:`, attMigErr?.message);
+        }
+
+        // 5. Migrate cloud exam grades in Firestore
+        try {
+            const examsSnap = await getDocs(collection(firestore, 'Osras', classKey, 'exams'));
+            for (const examDoc of (examsSnap.docs || [])) {
+                const examId = examDoc.id;
+                for (const [loserId, wId] of loserToWinnerMap.entries()) {
+                    const oldGradeRef = doc(firestore, 'Osras', classKey, 'exams', examId, 'grades', String(loserId));
+                    try {
+                        const oldGradeSnap = await getDoc(oldGradeRef);
+                        if (oldGradeSnap.exists()) {
+                            const rawG = oldGradeSnap.data();
+                            const gData = rawG?.payload ? decryptData(rawG.payload) : rawG;
+                            if (gData) {
+                                const updatedGrade = { ...gData, childId: wId, updatedAt: now };
+                                const newGradeRef = doc(firestore, 'Osras', classKey, 'exams', examId, 'grades', String(wId));
+                                await setDoc(newGradeRef, { payload: encryptData(cleanData(updatedGrade)) }, { merge: true });
+                                await deleteDoc(oldGradeRef);
+                            }
+                        }
+                    } catch (_) {}
+                }
+            }
+        } catch (grdMigErr) {
+            console.warn(`⚠️ Cloud grades migration warning in ${classKey}:`, grdMigErr?.message);
+        }
+    }
+
+    // 6. Migrate local Dexie attendance from losers to winners
+    try {
+        const allLocalAtt = await db.attendance.toArray();
+        for (const att of allLocalAtt) {
+            const cId = String(att.childId || '');
+            if (loserToWinnerMap.has(cId)) {
+                await db.attendance.update(att.id, { childId: loserToWinnerMap.get(cId), updatedAt: now });
+            }
+        }
+    } catch (_) {}
+
+    // 7. Migrate local Dexie grades from losers to winners
+    try {
+        const allLocalGrades = await db.grades.toArray();
+        for (const grd of allLocalGrades) {
+            const cId = String(grd.childId || '');
+            if (loserToWinnerMap.has(cId)) {
+                await db.grades.update(grd.id, { childId: loserToWinnerMap.get(cId), updatedAt: now });
+            }
+        }
+    } catch (_) {}
+
+    // 8. Safely purge loser children from local Dexie
+    for (const loser of losersToDelete) {
+        await safePurgeLocalChild(loser.id);
+    }
+
+    console.log(`✅ [Deduplication] Permanently resolved ${loserToWinnerMap.size} duplicates in ${classKey}.`);
+    return { canonicalChildren, purgedCount: loserToWinnerMap.size };
+}
+
+/**
  * 🎯 Strict Cloud-to-Local Reconciliation for a specific class (syncKey).
  * 
- * 1. Inserts/updates authoritative cloud children into Dexie (isDirty: false, isDeleted: false).
- * 2. Compares local Dexie records for that class against the cloud snapshot:
+ * 1. Permanently resolves cloud duplicates by normalized name and updates Firestore.
+ * 2. Inserts/updates authoritative cloud children into Dexie (isDirty: false, isDeleted: false).
+ * 3. Compares local Dexie records for that class against the cloud snapshot:
  *    - Soft-deleted records (isDeleted: true) are immediately purged.
  *    - Duplicate Name Safeguard: Any local child sharing the same normalized name
- *      with a cloud record but having a different ID (left over from ID migration or duplicate import)
- *      is immediately purged from Dexie using safePurgeLocalChild.
+ *      with a cloud record but having a different ID is permanently deleted from Firestore and Dexie.
  *    - Ghost/Cloud-Deleted Safeguard: Any local record NOT in the cloud snapshot
  *      (and not pushed in this current sync cycle) is immediately purged.
  * 
@@ -132,12 +337,17 @@ export async function reconcileClassChildren(classKey, cloudChildrenForClass = [
 
     const targetClassKey = String(classKey).trim();
 
-    // 1. Build canonical lookup structures from Firestore snapshot
+    // 0. Permanent Cloud + Local Deduplication:
+    // Resolve duplicate children on Firestore and Dexie deterministically
+    const { canonicalChildren, purgedCount } = await deduplicateCloudChildrenForClass(targetClassKey, cloudChildrenForClass);
+    purged += purgedCount;
+
+    // 1. Build canonical lookup structures from deduplicated snapshot
     const cloudDocIds = new Set();
     const cloudNameMap = new Map(); // normalizedName -> canonicalDocId
     const canonicalCloudMap = new Map(); // canonicalId -> childData
 
-    for (const rawChild of cloudChildrenForClass) {
+    for (const rawChild of canonicalChildren) {
         if (!rawChild || rawChild.id === '_placeholder' || rawChild.isPlaceholder) continue;
         const cleanId = ensureCleanChildId(rawChild.id, rawChild.gender);
         const childData = {
@@ -181,28 +391,34 @@ export async function reconcileClassChildren(classKey, cloudChildrenForClass = [
 
     // 3. Query all local children in Dexie belonging to this class
     const localChildrenInClass = await db.children.where('syncKey').equals(targetClassKey).toArray();
+    let localPurged = 0;
 
     for (const localChild of localChildrenInClass) {
         const localIdStr = String(localChild.id);
 
         // a. Immediate purge if marked deleted
         if (localChild.isDeleted) {
-            console.log(`🗑️ [Reconciliation] Purging deleted local child: ${localIdStr} (${localChild.name}) in ${targetClassKey}`);
             await safePurgeLocalChild(localChild.id);
             purged++;
+            localPurged++;
             continue;
         }
 
         // b. Duplicate Name / Class Safeguard:
         // If this local record has the same normalized name as a canonical cloud record,
-        // but has a different ID, keep only canonical and purge the duplicate!
+        // but has a different ID, keep only canonical, delete from cloud if present, and purge local!
         const normLocalName = normalizeArabicName(localChild.name);
         if (normLocalName && cloudNameMap.has(normLocalName)) {
             const canonicalId = cloudNameMap.get(normLocalName);
             if (localIdStr !== canonicalId && String(localChild.id) !== canonicalId) {
-                console.log(`🧹 [Reconciliation] Duplicate name safeguard: Purging duplicate local child "${localChild.name}" (old ID: ${localChild.id}, canonical: ${canonicalId}) in ${targetClassKey}`);
+                if (navigator.onLine) {
+                    try {
+                        await deleteDoc(doc(firestore, 'Osras', targetClassKey, 'children', localIdStr));
+                    } catch (_) {}
+                }
                 await safePurgeLocalChild(localChild.id);
                 purged++;
+                localPurged++;
                 continue;
             }
         }
@@ -213,25 +429,21 @@ export async function reconcileClassChildren(classKey, cloudChildrenForClass = [
         const wasJustPushed = pushedChildrenIds.has(localChild.id) || pushedChildrenIds.has(localIdStr);
 
         if (!isInCloud && !wasJustPushed) {
-            console.log(`🗑️ [Reconciliation] Purging cloud-deleted/ghost child "${localChild.name}" (ID: ${localChild.id}) in ${targetClassKey}`);
             await safePurgeLocalChild(localChild.id);
             purged++;
+            localPurged++;
             continue;
         }
+    }
+
+    if (localPurged > 0) {
+        console.log(`🧹 [Reconciliation] Purged ${localPurged} duplicate/ghost local records in ${targetClassKey}`);
     }
 
     return { added, updated, purged };
 }
 
-/**
- * 👑 Reconciles the local Dexie database across all registered classes (Osras).
- * Called by MasterDashboard and syncDataWithCloud when running full admin sync.
- * 
- * @param {Array<object>} osrasList - List of Osra objects with syncKey
- * @returns {Promise<{ success: boolean, totalPurged: number }>}
- */
-export async function reconcileAllClassesWithCloud(osrasList = []) {
-    if (!navigator.onLine) return { success: false, totalPurged: 0 };
+const _performReconcileAllClassesWithCloud = async (osrasList = []) => {
     try {
         console.log(`🔄 [Global Reconciliation] Starting reconciliation across ${osrasList.length} classes...`);
         const pushedIds = new Set();
@@ -297,13 +509,17 @@ export async function reconcileAllClassesWithCloud(osrasList = []) {
         // 3. Purge any orphan records in local Dexie whose syncKey does not belong to any active Osra
         if (validSyncKeys.size > 0) {
             const allLocal = await db.children.toArray();
+            let orphanCount = 0;
             for (const c of allLocal) {
                 const sKey = String(c.syncKey || '');
                 if ((!sKey || !validSyncKeys.has(sKey)) && !pushedIds.has(c.id)) {
-                    console.log(`🗑️ [Global Reconciliation] Purging orphan child "${c.name}" with unknown syncKey (${sKey}):`, c.id);
                     await safePurgeLocalChild(c.id);
                     totalPurged++;
+                    orphanCount++;
                 }
+            }
+            if (orphanCount > 0) {
+                console.log(`🗑️ [Global Reconciliation] Purged ${orphanCount} orphan children with unknown syncKey`);
             }
         }
 
@@ -313,6 +529,33 @@ export async function reconcileAllClassesWithCloud(osrasList = []) {
         console.error('❌ [Global Reconciliation] Error:', err);
         return { success: false, error: err.message };
     }
+};
+
+/**
+ * 👑 Reconciles the local Dexie database across all registered classes (Osras).
+ * Called by MasterDashboard and syncDataWithCloud when running full admin sync.
+ * Guarded by activeReconcilePromise mutex.
+ * 
+ * @param {Array<object>} osrasList - List of Osra objects with syncKey
+ * @returns {Promise<{ success: boolean, totalPurged: number }>}
+ */
+export async function reconcileAllClassesWithCloud(osrasList = []) {
+    if (!navigator.onLine) return { success: false, totalPurged: 0 };
+
+    if (activeReconcilePromise) {
+        console.log("ℹ️ [Reconciliation] Global reconciliation already in progress, awaiting existing promise...");
+        return activeReconcilePromise;
+    }
+
+    activeReconcilePromise = (async () => {
+        try {
+            return await _performReconcileAllClassesWithCloud(osrasList);
+        } finally {
+            activeReconcilePromise = null;
+        }
+    })();
+
+    return activeReconcilePromise;
 }
 
 const _syncDataWithCloud = async () => {
@@ -665,12 +908,16 @@ const _syncDataWithCloud = async () => {
         if (isAdmin && classesToSync.length > 0) {
             const validKeySet = new Set(classesToSync.map(String));
             const allLocal = await db.children.toArray();
+            let orphanAdminCount = 0;
             for (const c of allLocal) {
                 const sKey = String(c.syncKey || '');
                 if ((!sKey || !validKeySet.has(sKey)) && !pushedChildrenIds.has(c.id)) {
-                    console.log(`🗑️ [Sync Admin] Purging orphan child "${c.name}" with invalid syncKey (${sKey}):`, c.id);
                     await safePurgeLocalChild(c.id);
+                    orphanAdminCount++;
                 }
+            }
+            if (orphanAdminCount > 0) {
+                console.log(`🗑️ [Sync Admin] Purged ${orphanAdminCount} orphan children with invalid syncKey`);
             }
         }
 
@@ -998,7 +1245,7 @@ const _syncDataWithCloud = async () => {
     }
 };
 
-export const syncDataWithCloud = async (retryCount = 0) => {
+const _performSyncDataWithCloud = async (retryCount = 0) => {
     // 1. Immediate hardware check Before starting
     if (!navigator.onLine) {
         return { success: false, message: "⚠️ لا يوجد اتصال بالإنترنت. يرجى المحاولة لاحقاً." };
@@ -1030,7 +1277,7 @@ export const syncDataWithCloud = async (retryCount = 0) => {
         if (error.message === "NETWORK_TIMEOUT") {
             if (retryCount < 1) {
                 console.log("⏱️ Sync timeout. Retrying gracefully...");
-                return await syncDataWithCloud(retryCount + 1);
+                return await _performSyncDataWithCloud(retryCount + 1);
             }
             window.dispatchEvent(new CustomEvent('global-sync-status', { detail: { status: 'error' } }));
             return { success: false, message: "⏱️ انتهت مهلة الاتصال بالإنترنت أثناء الرفع. الرجاء التأكد من استقرار الشبكة." };
@@ -1038,4 +1285,29 @@ export const syncDataWithCloud = async (retryCount = 0) => {
         window.dispatchEvent(new CustomEvent('global-sync-status', { detail: { status: 'error' } }));
         return { success: false, message: `حصلت مشكلة: ${error.message}` };
     }
+};
+
+/**
+ * Global synchronized cloud push & pull.
+ * Guarded by activeSyncPromise singleton to prevent concurrent overlapping sync cycles.
+ */
+export const syncDataWithCloud = async (retryCount = 0) => {
+    if (!navigator.onLine) {
+        return { success: false, message: "⚠️ لا يوجد اتصال بالإنترنت. يرجى المحاولة لاحقاً." };
+    }
+
+    if (activeSyncPromise) {
+        console.log("ℹ️ [Sync] Sync already in progress, awaiting active sync promise...");
+        return activeSyncPromise;
+    }
+
+    activeSyncPromise = (async () => {
+        try {
+            return await _performSyncDataWithCloud(retryCount);
+        } finally {
+            activeSyncPromise = null;
+        }
+    })();
+
+    return activeSyncPromise;
 };

@@ -16,6 +16,7 @@ const cleanData = (obj) => {
 };
 
 let isMigrationRunning = false;
+let hasRunMigrationThisSession = false;
 
 /**
  * Runs migration across local Dexie storage.
@@ -290,8 +291,10 @@ export async function runCloudIdMigration(localIdMap = new Map()) {
 /**
  * Master migration runner.
  * First migrates local Dexie storage immediately, then migrates Firebase Firestore if online.
+ * Runs only once per session unless force=true.
  */
-export async function runIdMigration() {
+export async function runIdMigration(force = false) {
+    if (hasRunMigrationThisSession && !force) return;
     if (isMigrationRunning) return;
     isMigrationRunning = true;
     try {
@@ -299,6 +302,7 @@ export async function runIdMigration() {
         if (navigator.onLine) {
             await runCloudIdMigration(localIdMap);
         }
+        hasRunMigrationThisSession = true;
     } catch (err) {
         console.error('❌ [Migration] Master runner error:', err);
     } finally {

@@ -2,10 +2,11 @@ import { useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { db } from '../db/database';
 import { firestore } from '../db/firebase';
-import { collection, collectionGroup, onSnapshot } from 'firebase/firestore';
+import { collection, collectionGroup, onSnapshot, doc, deleteDoc } from 'firebase/firestore';
 import { decryptData } from '../encryption';
 import { ensureCleanChildId, isCleanChildId } from '../utils/idGenerator';
 import { normalizeArabicName } from '../utils/nameUtils';
+import { deduplicateCloudChildrenForClass } from '../db/sync';
 
 /**
  * 🔄 useRealtimeChildren — Global Real-time Firestore Listener
@@ -61,13 +62,16 @@ export default function useRealtimeChildren() {
 
             try {
                 const changes = snapshot.docChanges();
-                const cloudDocIds = new Set();
-                const cloudNameMap = new Map(); // normalizedName -> canonicalDocId
                 const toDeleteIds = new Set();
                 const toPut = [];
                 const now = new Date().toISOString();
 
-                // 1. Build authoritative sets from all docs in the snapshot
+                const effectiveClassKey = targetClassKey || (
+                    !isMaster && !isStageAdmin ? currentSyncKey : ''
+                );
+
+                // 1. Parse all valid docs in the snapshot
+                const rawChildrenList = [];
                 for (const docSnap of snapshot.docs) {
                     if (docSnap.id === '_placeholder') continue;
                     const rawData = docSnap.data();
@@ -76,11 +80,31 @@ export default function useRealtimeChildren() {
                     let data = rawData.payload ? decryptData(rawData.payload) : rawData;
                     if (!data) continue;
 
-                    const childId = String(data.id || docSnap.id);
-                    cloudDocIds.add(childId);
-                    cloudDocIds.add(String(docSnap.id));
+                    const cleanId = ensureCleanChildId(data.id || docSnap.id, data.gender);
+                    rawChildrenList.push({
+                        ...data,
+                        id: cleanId,
+                        _rawId: docSnap.id
+                    });
+                }
 
-                    const normName = normalizeArabicName(data.name);
+                // Permanent Cloud + Local Deduplication by Normalized Name
+                let canonicalDocs = rawChildrenList;
+                const classToDeduplicate = effectiveClassKey || (rawChildrenList[0]?.syncKey);
+                if (classToDeduplicate) {
+                    const dedupResult = await deduplicateCloudChildrenForClass(classToDeduplicate, rawChildrenList);
+                    canonicalDocs = dedupResult.canonicalChildren;
+                }
+
+                const cloudDocIds = new Set();
+                const cloudNameMap = new Map(); // normalizedName -> canonicalDocId
+
+                for (const child of canonicalDocs) {
+                    const childId = String(child.id);
+                    cloudDocIds.add(childId);
+                    if (child._rawId) cloudDocIds.add(String(child._rawId));
+
+                    const normName = normalizeArabicName(child.name);
                     if (normName) {
                         cloudNameMap.set(normName, childId);
                     }
@@ -103,10 +127,17 @@ export default function useRealtimeChildren() {
                         let data = rawData.payload ? decryptData(rawData.payload) : rawData;
                         if (!data) continue;
 
-                        const childId = data.id || docId;
+                        const childId = String(data.id || docId);
                         if (data.isDeleted) {
                             toDeleteIds.add(childId);
                         } else {
+                            // Check if this doc was rejected as an obsolete duplicate loser
+                            const normName = normalizeArabicName(data.name);
+                            if (normName && cloudNameMap.has(normName) && cloudNameMap.get(normName) !== childId) {
+                                toDeleteIds.add(childId);
+                                continue;
+                            }
+
                             // Verify if local child has uncommitted offline changes (isDirty)
                             const localChild = await db.children.get(childId);
                             if (localChild && localChild.isDirty) {
@@ -160,6 +191,11 @@ export default function useRealtimeChildren() {
                         if (normLocalName && cloudNameMap.has(normLocalName)) {
                             const canonicalId = cloudNameMap.get(normLocalName);
                             if (localIdStr !== canonicalId && String(localChild.id) !== canonicalId) {
+                                if (navigator.onLine && classToDeduplicate) {
+                                    try {
+                                        deleteDoc(doc(firestore, 'Osras', classToDeduplicate, 'children', localIdStr)).catch(() => {});
+                                    } catch (_) {}
+                                }
                                 toDeleteIds.add(localChild.id);
                                 continue;
                             }
