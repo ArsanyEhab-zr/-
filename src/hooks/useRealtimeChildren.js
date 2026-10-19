@@ -242,14 +242,20 @@ export default function useRealtimeChildren() {
                         if (existingRecords.length > 0) {
                             const first = existingRecords[0];
                             if (!first.isDirty) {
-                                await db.attendance.update(first.id, attPayload);
+                                await db.attendance.put({ ...attPayload, id: first.id });
                             }
                             // Clean up duplicates if any
                             for (let i = 1; i < existingRecords.length; i++) {
                                 try { await db.attendance.delete(existingRecords[i].id); } catch (_) {}
                             }
                         } else {
-                            await db.attendance.add(attPayload);
+                            if (attPayload.id !== undefined) {
+                                const collision = await db.attendance.get(attPayload.id);
+                                if (collision && (String(collision.childId) !== childId || collision.date !== date || collision.type !== type)) {
+                                    delete attPayload.id;
+                                }
+                            }
+                            await db.attendance.put(attPayload);
                         }
                     }
                 }

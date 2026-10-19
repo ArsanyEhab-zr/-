@@ -12,7 +12,7 @@ import { encryptData, decryptData } from '../encryption';
 import {
     BarChart3, Users, ArrowRight,
     ImagePlus, Loader2, Sparkles, BookOpen, UserPlus, Edit3, Trash2,
-    Lock, Shirt, MapPin, DatabaseBackup, Save, FileSpreadsheet, ChevronRight, Phone, Search, Map, Calendar, Briefcase, StickyNote, Camera,
+    Lock, Shirt, MapPin, DatabaseBackup, Save, FileSpreadsheet, ChevronRight, Phone, Search, Map as MapIcon, Calendar, Briefcase, StickyNote, Camera,
     LogOut, ShieldAlert, Download, AlertTriangle, RefreshCw, Music, CloudUpload, UserCheck, ClipboardList, Printer, Upload
 } from 'lucide-react';
 import useAutoSync from '../hooks/useAutoSync';
@@ -116,6 +116,7 @@ export default function Dashboard() {
     useEffect(() => {
         const purgeDuplicateAttendance = async () => {
             try {
+                if (!db || !db.attendance) return;
                 const allRecords = await db.attendance.toArray();
                 if (!allRecords || allRecords.length === 0) return;
 
@@ -153,11 +154,17 @@ export default function Dashboard() {
                     await db.attendance.bulkDelete(idsToDelete);
                 }
             } catch (err) {
-                console.error("[Dashboard] Error purging duplicate attendance:", err);
+                console.warn("[Dashboard] Error purging duplicate attendance:", err);
             }
         };
 
-        purgeDuplicateAttendance();
+        try {
+            purgeDuplicateAttendance().catch(err => {
+                console.warn("[Dashboard] Error purging duplicate attendance:", err);
+            });
+        } catch (err) {
+            console.warn("[Dashboard] Error initiating attendance purge:", err);
+        }
     }, []);
 
     const rawChildren = useLiveQuery(async () => {
@@ -1052,7 +1059,7 @@ function KidsManagerView({ childrenData, activeClassKey }) {
                         </div>
 
                         <div className="space-y-1">
-                            <label className="text-xs font-bold text-blue-600 ml-1 flex items-center gap-1"><Map size={12} /> لوكيشن البيت (GPS Link)</label>
+                            <label className="text-xs font-bold text-blue-600 ml-1 flex items-center gap-1"><MapIcon size={12} /> لوكيشن البيت (GPS Link)</label>
                             <input type="url" value={formChild.gpsLink || ''} onChange={e => setFormChild({ ...formChild, gpsLink: e.target.value })} className="w-full p-4 bg-blue-50 border border-blue-100 rounded-xl font-bold text-left" dir="ltr" />
                         </div>
 
