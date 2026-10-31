@@ -5,6 +5,7 @@ import { FileSpreadsheet, Loader2, Upload } from 'lucide-react';
 
 import useAutoSync from '../hooks/useAutoSync';
 import { generateChildId, isCleanChildId, ensureCleanChildId } from '../utils/idGenerator';
+import { ensureExcelSafeImage } from '../utils/imageUtils';
 
 export default function ExcelImporter() {
     const [isImporting, setIsImporting] = useState(false);
@@ -201,12 +202,15 @@ export default function ExcelImporter() {
                             (c.name && childData.name && c.name.trim() === childData.name.trim())
                         );
 
+                        const rawPic = childData.profilePic || (existingChild ? existingChild.profilePic : "");
+                        const safePic = rawPic ? await ensureExcelSafeImage(rawPic) : "";
+
                         if (existingChild) {
                             const finalId = ensureCleanChildId(existingChild.id, childData.gender, undefined, existingIds);
                             const updated = { 
                                 ...existingChild, 
                                 ...childData, 
-                                profilePic: childData.profilePic || existingChild.profilePic || "",
+                                profilePic: safePic,
                                 streak: childData.streak || existingChild.streak || 0,
                                 last_liturgy: existingChild.last_liturgy || null,
                                 last_service: existingChild.last_service || null,
@@ -223,6 +227,7 @@ export default function ExcelImporter() {
                         } else {
                             const finalId = ensureCleanChildId(childData.id, childData.gender, undefined, existingIds);
                             childData.id = finalId;
+                            childData.profilePic = safePic;
                             existingIds.add(finalId);
                             await db.children.add(childData);
                             existingChildren.push({ ...childData });

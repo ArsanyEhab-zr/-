@@ -21,7 +21,7 @@ import ExcelImporter from '../components/ExcelImporter';
 import { generateChildId } from '../utils/idGenerator';
 import { safePurgeLocalChild } from '../db/sync';
 import { normalizeArabicName } from '../utils/nameUtils';
-import { compressImageToBase64, handleImageError } from '../utils/imageUtils';
+import { compressImageToBase64, handleImageError, ensureExcelSafeImage, sanitizeExcelRow } from '../utils/imageUtils';
 import SmartAlertsCard from '../components/SmartAlertsCard';
 
 const getSettings = () => {
@@ -44,6 +44,7 @@ const getSettings = () => {
 export default function Dashboard() {
     const [currentView, setCurrentView] = useState('menu');
     const [appSettings, setAppSettings] = useState(getSettings());
+    const [isExporting, setIsExporting] = useState(false);
     const currentSyncKey = localStorage.getItem('currentSyncKey');
     const currentServantObj = useMemo(() => {
         try {
@@ -540,7 +541,8 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
     const sortedVisitDates = Object.keys(visitationsByDate).sort((a, b) => new Date(b) - new Date(a));
 
     // ─── 📥 3. الشيت الإكسيل الذكي (الكل - ولاد - بنات) ───
-    const handleExport = (filterType) => {
+    const handleExport = async (filterType) => {
+        if (isExporting) return;
         const currentYear = new Date().getFullYear();
 
         // 🌟 فلترة الداتا وتحديد اسم الملف بناءً على الزرار اللي انداس
@@ -563,62 +565,79 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
             return;
         }
 
-        const dataForExcel = dataToExport.map(c => {
-            // حساب العمر
-            const calculatedAge = calculateExactAge(c.birthDate);
+        setIsExporting(true);
+        try {
+            const rawExcelData = await Promise.all(dataToExport.map(async (c) => {
+                // حساب العمر
+                const calculatedAge = calculateExactAge(c.birthDate);
 
-            // حساب الحضور — باستخدام الداتا المفلترة والمنقحة من التكرار عبر Set
-            const strId = String(c.id).trim();
-            const childRecords = attendanceData.filter(a => String(a.childId).trim() === strId && !a.isDeleted && a.status !== 'absent');
-            
-            const serviceDates = new Set(childRecords.filter(a => String(a.type || 'service').trim().toLowerCase() === 'service').map(a => a.date));
-            const liturgyDates = new Set(childRecords.filter(a => String(a.type || '').trim().toLowerCase() === 'liturgy').map(a => a.date));
-            const tasbehaDates = new Set(childRecords.filter(a => String(a.type || '').trim().toLowerCase() === 'tasbeha').map(a => a.date));
+                // حساب الحضور — باستخدام الداتا المفلترة والمنقحة من التكرار عبر Set
+                const strId = String(c.id).trim();
+                const childRecords = attendanceData.filter(a => String(a.childId).trim() === strId && !a.isDeleted && a.status !== 'absent');
+                
+                const serviceDates = new Set(childRecords.filter(a => String(a.type || 'service').trim().toLowerCase() === 'service').map(a => a.date));
+                const liturgyDates = new Set(childRecords.filter(a => String(a.type || '').trim().toLowerCase() === 'liturgy').map(a => a.date));
+                const tasbehaDates = new Set(childRecords.filter(a => String(a.type || '').trim().toLowerCase() === 'tasbeha').map(a => a.date));
 
-            const totalService = serviceDates.size;
-            const totalLiturgy = liturgyDates.size;
-            const totalTasbeha = tasbehaDates.size;
+                const totalService = serviceDates.size;
+                const totalLiturgy = liturgyDates.size;
+                const totalTasbeha = tasbehaDates.size;
 
-            return {
-                "م": c.id,
-                "كود المخدوم": c.id || "لم يتم إنشاء كود",
-                "اسم المخدوم": c.name || 'بدون اسم',
-                "النوع": c.gender || 'غير محدد',
-                "رابط الصورة المرفوعة": c.profilePic ? c.profilePic : "لا توجد صورة",
-                "تاريخ الميلاد": c.birthDate || 'غير مسجل',
-                "العمر التقريبي": calculatedAge,
-                "تليفون الأم": c.motherPhone || 'لا يوجد',
-                "تليفون الأب": c.fatherPhone || 'لا يوجد',
-                "تليفون المخدوم": c.childPhone || 'لا يوجد',
-                "الواتساب للتواصل": c.whatsappTarget === 'father' ? 'الأب' : c.whatsappTarget === 'child' ? 'المخدوم' : 'الأم',
-                "المنطقة السكنية": c.address || 'غير محدد',
-                "العنوان التفصيلي": c.detailedAddress || 'غير مسجل',
-                "إجمالي حضور الخدمة": totalService,
-                "إجمالي حضور القداس": totalLiturgy,
-                "إجمالي حضور التسبحة": totalTasbeha,
-                "المواظبة المتتالية الحالية": c.streak || 0,
-                "آخر حضور قداس": c.last_liturgy || 'لم يحضر',
-                "آخر حضور خدمة": c.last_service || 'لم يحضر',
-                "آخر حضور تسبحة": c.last_tasbeha || 'لم يحضر',
-                "آخر تاريخ افتقاد": c.last_visited || 'لم يُفتقد',
-                "أب الاعتراف": c.fatherConfessor || 'غير مسجل',
-                "الرتبة الشماسية": c.gender === 'ولد' ? (c.isOrdained ? c.ordinationRank || 'شماس' : 'غير مرسوم') : 'غير مطبق',
-                "ملاحظات إضافية": c.specialNotes || 'لا يوجد',
-                "بيانات الـ QR": c.id ? `KHD:${c.id}` : "غير متوفر"
-            };
-        });
+                // معالجة وضمان سلامة رابط/بيانات الصورة للإكسيل (< 31000 حرف)
+                let safeProfilePic = "لا توجد صورة";
+                if (c.profilePic) {
+                    safeProfilePic = await ensureExcelSafeImage(c.profilePic, { id: c.id, table: 'children' });
+                }
 
-        const worksheet = XLSX.utils.json_to_sheet(dataForExcel);
+                return {
+                    "م": c.id,
+                    "كود المخدوم": c.id || "لم يتم إنشاء كود",
+                    "اسم المخدوم": c.name || 'بدون اسم',
+                    "النوع": c.gender || 'غير محدد',
+                    "رابط الصورة المرفوعة": safeProfilePic,
+                    "تاريخ الميلاد": c.birthDate || 'غير مسجل',
+                    "العمر التقريبي": calculatedAge,
+                    "تليفون الأم": c.motherPhone || 'لا يوجد',
+                    "تليفون الأب": c.fatherPhone || 'لا يوجد',
+                    "تليفون المخدوم": c.childPhone || 'لا يوجد',
+                    "الواتساب للتواصل": c.whatsappTarget === 'father' ? 'الأب' : c.whatsappTarget === 'child' ? 'المخدوم' : 'الأم',
+                    "المنطقة السكنية": c.address || 'غير محدد',
+                    "العنوان التفصيلي": c.detailedAddress || 'غير مسجل',
+                    "إجمالي حضور الخدمة": totalService,
+                    "إجمالي حضور القداس": totalLiturgy,
+                    "إجمالي حضور التسبحة": totalTasbeha,
+                    "المواظبة المتتالية الحالية": c.streak || 0,
+                    "آخر حضور قداس": c.last_liturgy || 'لم يحضر',
+                    "آخر حضور خدمة": c.last_service || 'لم يحضر',
+                    "آخر حضور تسبحة": c.last_tasbeha || 'لم يحضر',
+                    "آخر تاريخ افتقاد": c.last_visited || 'لم يُفتقد',
+                    "أب الاعتراف": c.fatherConfessor || 'غير مسجل',
+                    "الرتبة الشماسية": c.gender === 'ولد' ? (c.isOrdained ? c.ordinationRank || 'شماس' : 'غير مرسوم') : 'غير مطبق',
+                    "ملاحظات إضافية": c.specialNotes || 'لا يوجد',
+                    "بيانات الـ QR": c.id ? `KHD:${c.id}` : "غير متوفر"
+                };
+            }));
 
-        // تظبيط عرض العواميد
-        const wscols = [
-            { wch: 5 }, { wch: 15 }, { wch: 25 }, { wch: 10 }, { wch: 40 }, { wch: 15 }, { wch: 12 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 35 }, { wch: 18 }, { wch: 18 }, { wch: 22 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 40 }, { wch: 20 }
-        ];
-        worksheet['!cols'] = wscols;
+            // تطهير نهائي لضمان عدم تجاوز أي نص 32,000 حرف مع الحفاظ التام على الصورة الصالحة
+            const dataForExcel = rawExcelData.map(row => sanitizeExcelRow(row, "رابط الصورة المرفوعة"));
 
-        const workbook = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
-        XLSX.writeFile(workbook, `${fileName}_${today}.xlsx`);
+            const worksheet = XLSX.utils.json_to_sheet(dataForExcel);
+
+            // تظبيط عرض العواميد
+            const wscols = [
+                { wch: 5 }, { wch: 15 }, { wch: 25 }, { wch: 10 }, { wch: 40 }, { wch: 15 }, { wch: 12 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 35 }, { wch: 18 }, { wch: 18 }, { wch: 22 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 40 }, { wch: 20 }
+            ];
+            worksheet['!cols'] = wscols;
+
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+            XLSX.writeFile(workbook, `${fileName}_${today}.xlsx`);
+        } catch (err) {
+            console.error("خطأ في تصدير الإكسيل:", err);
+            alert("حدث خطأ أثناء استخراج البيانات!");
+        } finally {
+            setIsExporting(false);
+        }
     };
     const currentSyncKey = localStorage.getItem('currentSyncKey');
     const isMaster = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE' || currentSyncKey === 'STAGE_ADMIN';
@@ -777,15 +796,16 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
                 <p className="text-[10px] font-bold text-green-700/80 mb-5">اختر الفئة اللي عايز تطبعها أو تبعتها لخدامها.</p>
 
                 <div className="flex flex-col gap-3">
-                    <button onClick={() => handleExport('all')} className="w-full bg-green-600 text-white py-3.5 rounded-xl font-black text-sm hover:bg-green-700 active:scale-95 transition-all shadow-md flex items-center justify-center gap-2">
-                        <Download size={18} /> تحميل الكشف الشامل (الكل)
+                    <button onClick={() => handleExport('all')} disabled={isExporting} className="w-full bg-green-600 text-white py-3.5 rounded-xl font-black text-sm hover:bg-green-700 active:scale-95 transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-60">
+                        {isExporting ? <Loader2 className="animate-spin" size={18} /> : <Download size={18} />}
+                        {isExporting ? 'جاري تجهيز الكشف وضغط الصور...' : 'تحميل الكشف الشامل (الكل)'}
                     </button>
 
                     <div className="flex gap-3">
-                        <button onClick={() => handleExport('boys')} className="flex-1 bg-blue-500 text-white py-3 rounded-xl font-black text-xs hover:bg-blue-600 active:scale-95 transition-all shadow-md flex items-center justify-center gap-1.5">
+                        <button onClick={() => handleExport('boys')} disabled={isExporting} className="flex-1 bg-blue-500 text-white py-3 rounded-xl font-black text-xs hover:bg-blue-600 active:scale-95 transition-all shadow-md flex items-center justify-center gap-1.5 disabled:opacity-60">
                             👦 كشف الولاد
                         </button>
-                        <button onClick={() => handleExport('girls')} className="flex-1 bg-pink-500 text-white py-3 rounded-xl font-black text-xs hover:bg-pink-600 active:scale-95 transition-all shadow-md flex items-center justify-center gap-1.5">
+                        <button onClick={() => handleExport('girls')} disabled={isExporting} className="flex-1 bg-pink-500 text-white py-3 rounded-xl font-black text-xs hover:bg-pink-600 active:scale-95 transition-all shadow-md flex items-center justify-center gap-1.5 disabled:opacity-60">
                             👧 كشف البنات
                         </button>
                     </div>

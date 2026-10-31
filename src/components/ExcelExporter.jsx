@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import * as XLSX from 'xlsx';
 import { db } from '../db/database';
 import { Download, Loader2 } from 'lucide-react';
+import { ensureExcelSafeImage, sanitizeExcelRow } from '../utils/imageUtils';
 
 export default function ExcelExporter() {
     const [isExporting, setIsExporting] = useState(false);
@@ -37,8 +38,8 @@ export default function ExcelExporter() {
             const appSettings = JSON.parse(localStorage.getItem('appSettings')) || {};
             const services = appSettings.services || [];
 
-            // 3. تجهيز الداتا للإكسيل بطريقة شيك ومفهومة
-            const excelData = children.map(child => {
+            // 3. تجهيز الداتا للإكسيل بطريقة شيك ومفهومة وضمان أن الصور نصوص صالحة < 31,000 حرف
+            const rawExcelData = await Promise.all(children.map(async (child) => {
 
                 // 🔍 البحث عن اسم الأسرة والخدمة بناءً على مفتاح الطفل
                 let osraName = "غير محدد";
@@ -52,12 +53,18 @@ export default function ExcelExporter() {
                     }
                 });
 
+                // معالجة الصورة لضمان ملاءمتها لحدود خلية الإكسيل (32767 حرف) دون حذفها، وحفظها محلياً لتسريع المرات القادمة
+                let safeProfilePic = "لا توجد صورة";
+                if (child.profilePic) {
+                    safeProfilePic = await ensureExcelSafeImage(child.profilePic, { id: child.id, table: 'children' });
+                }
+
                 return {
                     "كود المخدوم": child.id || "لم يتم إنشاء كود",
                     "الاسم": child.name || "",
                     "كود الفصل": child.syncKey || "",
                     "النوع": child.gender || "",
-                    "رابط الصورة المرفوعة": child.profilePic ? child.profilePic : "لا توجد صورة",
+                    "رابط الصورة المرفوعة": safeProfilePic,
                     "الخدمة التابع لها": khedmaName,
                     "الأسرة التابع لها": osraName,
                     "تليفون الأم": child.motherPhone || "",
@@ -76,7 +83,10 @@ export default function ExcelExporter() {
                     "الرتبة الشماسية": ((child.gender === 'boy' || child.gender === 'ولد') && child.isOrdained) ? (child.ordinationRank || "") : "",
                     "بيانات الـ QR": child.id ? `KHD:${child.id}` : "غير متوفر"
                 };
-            });
+            }));
+
+            // تطهير نهائي لضمان عدم تجاوز أي نص 32,000 حرف مع الحفاظ التام على الصورة الصالحة
+            const excelData = rawExcelData.map(row => sanitizeExcelRow(row, "رابط الصورة المرفوعة"));
 
             // 4. إنشاء ملف الإكسيل وتحميله
             const worksheet = XLSX.utils.json_to_sheet(excelData);
@@ -119,10 +129,10 @@ export default function ExcelExporter() {
         <button
             onClick={handleExport}
             disabled={isExporting}
-            className="flex items-center justify-center gap-2 w-full py-4 rounded-2xl bg-emerald-50 border-2 border-emerald-200 text-emerald-700 font-black hover:bg-emerald-100 transition-all shadow-sm active:scale-95"
+            className="flex items-center justify-center gap-2 w-full py-4 rounded-2xl bg-emerald-50 border-2 border-emerald-200 text-emerald-700 font-black hover:bg-emerald-100 transition-all shadow-sm active:scale-95 disabled:opacity-60"
         >
             {isExporting ? <Loader2 className="animate-spin" size={20} /> : <Download size={20} />}
-            {isExporting ? 'جاري تجهيز الشيت...' : 'تحميل داتا النظام (Excel)'}
+            {isExporting ? 'جاري تجهيز الشيت وضغط الصور...' : 'تحميل داتا النظام (Excel)'}
         </button>
     );
 }

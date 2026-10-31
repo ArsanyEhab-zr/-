@@ -1,9 +1,11 @@
-import { compressImageToBase64 } from './imageUtils';
+import { compressImageToBase64, ensureExcelSafeImage, sanitizeExcelRow } from './imageUtils';
+
+export { compressImageToBase64, ensureExcelSafeImage, sanitizeExcelRow };
 
 /**
  * Uploads an image to Cloudinary with an aggressive Base64 offline-first fallback.
  * 
- * 1. Always compresses the image first (< 25KB WebP/JPEG) for fast upload and resilient local/cloud storage.
+ * 1. Always compresses the image first (< 25KB WebP/JPEG, guaranteed <= 30000 chars) for fast upload and resilient local/cloud storage.
  * 2. If offline, immediately returns the compressed Base64 Data URI without throwing.
  * 3. Tries uploading to Cloudinary with an 8s timeout.
  * 4. If Cloudinary fails or times out, immediately falls back to the compressed Base64 Data URI.
@@ -19,10 +21,10 @@ export const uploadImageToCloudinary = async (file, resourceType = 'auto') => {
     let base64Fallback = null;
     let fileToUpload = file;
 
-    // 1. Aggressively compress image first (300x300, WebP, quality 0.6, < 25KB)
+    // 1. Aggressively compress image first (240x240, WebP, quality 0.6, < 25KB, length <= 30000)
     if (!isRawFile) {
         try {
-            base64Fallback = await compressImageToBase64(file, 300, 300, 0.6, 'image/webp');
+            base64Fallback = await compressImageToBase64(file, 240, 240, 0.6, 'image/webp');
             // Cloudinary's upload API natively accepts Base64 Data URI strings in the file parameter!
             fileToUpload = base64Fallback;
         } catch (compErr) {
