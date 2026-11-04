@@ -5,7 +5,6 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
 import { Link, useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
-// 🌟 السطرين دول اتضافوا عشان السيستم يكلم فايربيز ويتأكد من الطرد
 import { collection, getDocs, onSnapshot, collectionGroup, setDoc, doc, addDoc, deleteDoc } from 'firebase/firestore';
 import { firestore } from '../db/firebase';
 import { encryptData, decryptData } from '../encryption';
@@ -19,9 +18,29 @@ import useAutoSync from '../hooks/useAutoSync';
 import { calculateExactAge } from '../utils/dateUtils';
 import ExcelImporter from '../components/ExcelImporter';
 import { generateChildId } from '../utils/idGenerator';
-import { safePurgeLocalChild } from '../db/sync';
-import { normalizeArabicName } from '../utils/nameUtils';
-import { compressImageToBase64, handleImageError, ensureExcelSafeImage, sanitizeExcelRow } from '../utils/imageUtils';
+import {
+    safePurgeLocalChild,
+    saveAndSyncChildEdit,
+    softDeleteChildWithSync,
+    getCurrentServantModificationName
+} from '../db/sync';
+import {
+    normalizeArabicName,
+    buildStrictDuplicateKey,
+    getAllConfiguredOsras,
+    resolveChildClassInfo,
+    normalizeToValidSyncKey,
+    parseTimestampMs
+} from '../utils/nameUtils';
+import {
+    compressImageToBase64,
+    handleImageError,
+    ensureExcelSafeImage,
+    sanitizeExcelRow,
+    getAvatarUrl,
+    repairAllExistingImages,
+    isValidProfilePic
+} from '../utils/imageUtils';
 import SmartAlertsCard from '../components/SmartAlertsCard';
 
 const getSettings = () => {
@@ -44,7 +63,6 @@ const getSettings = () => {
 export default function Dashboard() {
     const [currentView, setCurrentView] = useState('menu');
     const [appSettings, setAppSettings] = useState(getSettings());
-    const [isExporting, setIsExporting] = useState(false);
     const currentSyncKey = localStorage.getItem('currentSyncKey');
     const currentServantObj = useMemo(() => {
         try {
@@ -60,11 +78,18 @@ export default function Dashboard() {
                      currentServantObj.role === 'كاهن' ||
                      currentServantObj.role === 'Super Admin';
     
-    // 🔥 تعريفات سحب الداتا السحابية والمحلية
     const allowedClasses = currentServantObj.allowedClasses || [];
 
-    // All Osras from appSettings for dropdown selection
+    // All Osras from appSettings (supports khedmas, osras, and legacy services)
     const allOsras = useMemo(() => {
+        const configured = getAllConfiguredOsras(appSettings);
+        if (configured.length > 0) {
+            return configured.map(o => ({
+                name: o.name,
+                syncKey: String(o.syncKey).trim(),
+                stage: o.serviceName || ''
+            }));
+        }
         const list = [];
         (appSettings.services || []).forEach(srv => {
             (srv.osras || []).forEach(osra => {
@@ -102,7 +127,7 @@ export default function Dashboard() {
     };
 
     const activeClassKey = useMemo(() => {
-        if (!isMaster) {
+        if (!isMaster || (currentSyncKey && currentSyncKey !== 'MASTER_ACCESS' && currentSyncKey !== 'ADMIN_MODE' && currentSyncKey !== 'STAGE_ADMIN')) {
             return String(currentSyncKey || '').trim();
         }
         if (selectedAdminClass && selectedAdminClass !== 'ALL_CHURCH') {
@@ -139,8 +164,8 @@ export default function Dashboard() {
                 for (const [, records] of groups.entries()) {
                     if (records.length > 1) {
                         records.sort((a, b) => {
-                            const timeA = new Date(a.updatedAt || 0).getTime();
-                            const timeB = new Date(b.updatedAt || 0).getTime();
+                            const timeA = parseTimestampMs(a.updatedAt);
+                            const timeB = parseTimestampMs(b.updatedAt);
                             if (timeB !== timeA) return timeB - timeA;
                             return String(b.id || '').localeCompare(String(a.id || ''));
                         });
@@ -178,35 +203,25 @@ export default function Dashboard() {
         } else if (currentSyncKey) {
             rawKids = await db.children.where('syncKey').equals(currentSyncKey).toArray();
         }
-        
-        const saved = localStorage.getItem('appSettings');
-        const settings = saved ? JSON.parse(saved) : {};
-        const allValidSyncKeys = new Set((settings.services || []).flatMap(s => s.osras || []).map(o => String(o.syncKey || '').trim()).filter(Boolean));
 
         const seenIds = new Set();
-        const seenNameByClass = new Set();
+        const seenStrictKeys = new Set();
         const dedupedKids = [];
 
         for (const c of rawKids) {
             if (!c || c.isDeleted) continue;
 
-            const cSyncKey = String(c.syncKey || '').trim();
-            // Filter out orphan kids for master admin
-            if ((currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE') && allValidSyncKeys.size > 0 && !allValidSyncKeys.has(cSyncKey)) {
-                continue;
-            }
-
             const cId = String(c.id || '').trim();
             if (!cId || seenIds.has(cId)) continue;
 
-            const normName = normalizeArabicName(c.name);
-            const nameClassKey = `${cSyncKey}___${normName}`;
-            if (normName && seenNameByClass.has(nameClassKey)) {
-                continue; // duplicate ghost
+            // CRITICAL (Part 3): Only deduplicate in memory if exact same ID or strict 4-part name + non-empty phone in same class
+            const strictKey = buildStrictDuplicateKey(c, c.syncKey);
+            if (strictKey && seenStrictKeys.has(strictKey)) {
+                continue;
             }
 
             seenIds.add(cId);
-            if (normName) seenNameByClass.add(nameClassKey);
+            if (strictKey) seenStrictKeys.add(strictKey);
             dedupedKids.push(c);
         }
 
@@ -221,9 +236,6 @@ export default function Dashboard() {
         return rawChildren.filter(c => String(c.syncKey || '').trim() === activeClassKey);
     }, [rawChildren, activeClassKey]);
 
-    // 🛡️ Data Scoping Rules for Smart Alerts:
-    // - Master Admin / Stage Admin: analyze children across ALL active classes loaded in DB
-    // - Standard Servant: ONLY analyze children belonging to their active class
     const targetChildrenForAlerts = useMemo(() => {
         if (isMaster) {
             return (rawChildren || []).filter(c => !c.isDeleted);
@@ -231,7 +243,7 @@ export default function Dashboard() {
         return (scopedChildren || []).filter(c => !c.isDeleted);
     }, [isMaster, rawChildren, scopedChildren]);
 
-    // 🌟🌟🌟 زرعنا كود الطرد التلقائي هنا 🌟🌟🌟
+    // 🌟 فحص صلاحية الأسرة للخادم العادي
     useEffect(() => {
         const verifyServantAccess = async () => {
             try {
@@ -239,14 +251,17 @@ export default function Dashboard() {
                 if (!servantData) return;
 
                 const currentServant = JSON.parse(servantData);
-                // لو ده أدمن كبير ملوش أسرة متسجلة، مش هنطبق عليه الفحص ده
                 if (!currentServant.osraName) return;
 
                 const querySnapshot = await getDocs(collection(firestore, "System"));
                 let isOsraStillExists = false;
 
-                querySnapshot.forEach((doc) => {
-                    const data = doc.data();
+                querySnapshot.forEach((docSnap) => {
+                    const data = docSnap.data();
+                    const configured = getAllConfiguredOsras(data);
+                    if (configured.some(o => o.name === currentServant.osraName || o.syncKey === currentServant.osraKey)) {
+                        isOsraStillExists = true;
+                    }
                     if (data.services) {
                         data.services.forEach(service => {
                             if (service.osras) {
@@ -263,7 +278,6 @@ export default function Dashboard() {
                 if (!isOsraStillExists) {
                     alert("⚠️ جالك قرار إزالة! تم إغلاق أسرتك أو إزالتك من النظام المركزي بواسطة الإدارة. جاري مسح بياناتك وتسجيل الخروج فوراً.");
 
-                    // 🌟 الضربة القاضية: فرمتة الداتا بيز المحلية عشان منسيبش أثر
                     db.children.clear();
                     db.attendance.clear();
 
@@ -273,13 +287,11 @@ export default function Dashboard() {
                 }
             } catch (error) {
                 console.error("النت فاصل أو فيه مشكلة في فحص الصلاحيات:", error);
-                // لو النت فاصل هنسيبه يكمل أوفلاين عادي ومش هنطرده
             }
         };
 
         verifyServantAccess();
     }, []);
-    // 🌟🌟🌟 نهاية كود الطرد 🌟🌟🌟
 
     if (!rawChildren) return (
         <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center font-bold text-slate-400 gap-3">
@@ -289,8 +301,6 @@ export default function Dashboard() {
 
     const handleLogout = async () => {
         if (window.confirm("متأكد إنك عايز تسجل خروج؟ (سيتم مسح البيانات المحلية من الجهاز للأمان)")) {
-
-            // 🌟 تنظيف الموبايل بالكامل قبل ما يخرج
             await db.children.clear();
             await db.attendance.clear();
 
@@ -300,7 +310,8 @@ export default function Dashboard() {
         }
     };
 
-    const dynamicTitle = currentServantObj.stageName || currentServantObj.serviceName || currentServantObj.osraName || currentServantObj.role || appSettings.khedmaName || 'الخدمة';
+    const activeClassInfo = activeClassKey ? resolveChildClassInfo(activeClassKey, appSettings) : null;
+    const dynamicTitle = (activeClassInfo?.isKnown ? activeClassInfo.osraName : null) || currentServantObj.stageName || currentServantObj.serviceName || currentServantObj.osraName || currentServantObj.role || appSettings.khedmaName || 'الخدمة';
 
     return (
         <div className="min-h-screen bg-slate-50 font-sans pb-20" dir="rtl">
@@ -324,10 +335,10 @@ export default function Dashboard() {
                             )}
                             <div>
                                 <h1 className="text-sm font-black text-indigo-300">
-                                    {isMaster ? 'لوحة الإدارة المركزية' : dynamicTitle}
+                                    {(currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE') ? 'لوحة الإدارة المركزية' : dynamicTitle}
                                 </h1>
                                 <p className="text-xs font-bold text-slate-300">
-                                    {isMaster ? (activeClassKey ? `لوحة تحكم الأدمن (${scopedChildren.length} مخدوم)` : 'لوحة تحكم الأدمن (عام)') : currentView === 'menu' ? 'غرفة الإدارة' :
+                                    {(currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE') ? (activeClassKey ? `${activeClassInfo?.osraName || activeClassKey} (${scopedChildren.length} مخدوم)` : `كل الفصول (${scopedChildren.length} مخدوم)`) : currentView === 'menu' ? 'غرفة الإدارة' :
                                         currentView === 'stats' ? 'الإحصائيات والداتا' :
                                             currentView === 'kids' ? 'مرايا المخدومين' : 'إخوة الرب'}
                                 </p>
@@ -338,7 +349,7 @@ export default function Dashboard() {
             </header>
 
             <main className="p-4 max-w-4xl mx-auto mt-4">
-                {isMaster && allOsras.length > 0 && (
+                {(currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE' || currentSyncKey === 'STAGE_ADMIN') && allOsras.length > 0 && (
                     <div className="bg-white p-4 rounded-2xl shadow-sm border border-indigo-100 mb-4 flex flex-col sm:flex-row items-center justify-between gap-3">
                         <div className="flex items-center gap-2 text-xs font-black text-slate-700">
                             <Users className="text-indigo-600 w-4 h-4 shrink-0" />
@@ -366,7 +377,6 @@ export default function Dashboard() {
 
                 {currentView === 'menu' && (
                     <div className="animate-in fade-in zoom-in-95 duration-300">
-                        {/* 🔔 كارت التنبيهات الذكية والمتابعة الفورية القابل للطي */}
                         <SmartAlertsCard
                             isMaster={isMaster}
                             allOsras={allOsras}
@@ -380,7 +390,6 @@ export default function Dashboard() {
                                 <p className="text-xs font-bold text-slate-500 mt-1">سحب شيت الإكسيل، وتصفير العدادات</p>
                             </button>
 
-                            {/* 🌟 New Card for Servants Follow-up */}
                             {isMaster && (
                                 <>
                                     <Link to="/admin/servants-followup" className="bg-white p-6 rounded-[2.5rem] shadow-sm border-2 border-emerald-50 hover:border-emerald-200 transition-all flex flex-col items-center text-center group">
@@ -397,16 +406,13 @@ export default function Dashboard() {
                                 </>
                             )}
 
-                            {/* 🌟 مرايا المخدومين */}
                             <button onClick={() => setCurrentView('kids')} className="bg-white p-6 rounded-[2.5rem] shadow-sm border-2 border-blue-50 hover:border-blue-200 transition-all flex flex-col items-center text-center group">
                                 <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Users size={32} /></div>
                                 <h2 className="text-xl font-black text-slate-800">مرايا المخدومين</h2>
                                 <p className="text-xs font-bold text-slate-500 mt-1">إضافة مخدومين، وتعديل كل البيانات الشاملة</p>
                             </button>
-
                         </div>
 
-                        {/* 🌟 الزرار اللي بيودي لصفحة الأدمن المنفصلة */}
                         <div className="mt-10 text-center">
                             <Link to="/admin" className="text-[10px] text-slate-400 hover:text-slate-600 font-bold underline flex items-center justify-center gap-1 mx-auto">
                                 <ShieldAlert size={12} /> الانتقال للوحة الإدارة المركزية (Super Admin)
@@ -420,31 +426,28 @@ export default function Dashboard() {
                 )}
 
                 {currentView === 'stats' && <StatsView childrenData={scopedChildren} appSettings={appSettings} activeClassKey={activeClassKey} />}
-                {currentView === 'kids' && <KidsManagerView childrenData={scopedChildren} activeClassKey={activeClassKey} />}
-
-
+                {currentView === 'kids' && <KidsManagerView childrenData={scopedChildren} activeClassKey={activeClassKey} allOsras={allOsras} appSettings={appSettings} />}
             </main>
         </div>
     );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════
-// الإحصائيات والأبطال والذكاء الاصطناعي وإخوة الرب (زي ما هما بالظبط)
-// ══════════════════════════════════════════════════════════════════════════════════════
-// ══════════════════════════════════════════════════════════════════════════════════════
 // 1️⃣ الإحصائيات (Advanced Analytics Dashboard)
 // ══════════════════════════════════════════════════════════════════════════════════════
 function StatsView({ childrenData, appSettings, activeClassKey }) {
     const { triggerAutoSync } = useAutoSync();
+    const [isExporting, setIsExporting] = useState(false);
+    const [isRepairingImages, setIsRepairingImages] = useState(false);
+    const [repairProgress, setRepairProgress] = useState({ current: 0, total: 0, repairedCount: 0 });
+
     const total = childrenData.length;
     const boys = childrenData.filter(c => c.gender !== 'بنت').length;
     const girls = childrenData.filter(c => c.gender === 'بنت').length;
     const today = new Date().toISOString().split('T')[0];
 
     const currentYear = new Date().getFullYear();
-    const currentMonthPrefix = `${currentYear}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
     
-    // 🛡️ Strict Set of valid child IDs for the current scoped children list
     const validChildIds = useMemo(() => 
         new Set((childrenData || []).filter(c => !c.isDeleted).map(c => String(c.id).trim())),
         [childrenData]
@@ -455,7 +458,6 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
             .filter(a => a.date && a.date.startsWith(currentYear.toString()) && !a.isDeleted)
             .toArray();
         
-        // Filter strictly to valid children in current scope & activeClassKey (if present)
         const scopedRaw = rawAtt.filter(rec => {
             if (!rec || rec.isDeleted || rec.status === 'absent') return false;
             const recChildId = String(rec.childId || '').trim();
@@ -466,7 +468,6 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
             return true;
         });
 
-        // Deduplicate in memory by composite key: cleanDate_cleanChildId_cleanType (keep latest by updatedAt)
         const bestByKey = new Map();
         for (const record of scopedRaw) {
             const cleanDate = String(record.date).trim();
@@ -474,14 +475,13 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
             const cleanType = String(record.type || 'service').trim().toLowerCase();
             const compositeKey = `${cleanDate}_${cleanChildId}_${cleanType}`;
             const existing = bestByKey.get(compositeKey);
-            if (!existing || (record.updatedAt || '') > (existing.updatedAt || '')) {
+            if (!existing || parseTimestampMs(record.updatedAt) > parseTimestampMs(existing.updatedAt)) {
                 bestByKey.set(compositeKey, record);
             }
         }
         return Array.from(bestByKey.values());
     }, [currentYear, validChildIds, activeClassKey]) || [];
 
-    // ─── 📊 1. حساب إحصائيات الحضور لجُمع الشهر الحالي ───
     const getFridaysOfCurrentMonth = () => {
         const d = new Date();
         const year = d.getFullYear();
@@ -490,7 +490,6 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
         const date = new Date(year, month, 1);
         while (date.getMonth() === month) {
             if (date.getDay() === 5) {
-                // تظبيط الـ Timezone عشان التاريخ يفضل صح
                 const localDate = new Date(date.getTime() - (date.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
                 fridays.push(localDate);
             }
@@ -501,7 +500,6 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
 
     const monthFridays = getFridaysOfCurrentMonth();
 
-    // 🛡️ Strict unique count per Friday and type using a Set
     const getUniqueAttendanceCount = (dateStr, typeStr) => {
         const matched = new Set();
         const targetType = String(typeStr || 'service').trim().toLowerCase();
@@ -529,7 +527,6 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
         };
     });
 
-    // ─── 🏡 2. تجميع إحصائيات الافتقاد بالتواريخ ───
     const visitationsByDate = childrenData.reduce((acc, child) => {
         if (child.last_visited) {
             if (!acc[child.last_visited]) acc[child.last_visited] = [];
@@ -540,12 +537,10 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
 
     const sortedVisitDates = Object.keys(visitationsByDate).sort((a, b) => new Date(b) - new Date(a));
 
-    // ─── 📥 3. الشيت الإكسيل الذكي (الكل - ولاد - بنات) ───
+    // ─── 📥 3. الشيت الإكسيل الذكي (مع المصدر الوحيد للحقيقة للفصل والخدمة وحماية الصور) ───
     const handleExport = async (filterType) => {
         if (isExporting) return;
-        const currentYear = new Date().getFullYear();
 
-        // 🌟 فلترة الداتا وتحديد اسم الملف بناءً على الزرار اللي انداس
         let dataToExport = childrenData;
         let fileName = "أرشيف_الخدمة_الشامل";
         let sheetName = "التقرير الشامل";
@@ -568,10 +563,11 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
         setIsExporting(true);
         try {
             const rawExcelData = await Promise.all(dataToExport.map(async (c) => {
-                // حساب العمر
                 const calculatedAge = calculateExactAge(c.birthDate);
 
-                // حساب الحضور — باستخدام الداتا المفلترة والمنقحة من التكرار عبر Set
+                // 🔍 المصدر الوحيد للحقيقة لاسم الفصل والخدمة بناءً على c.syncKey
+                const classInfo = resolveChildClassInfo(c.syncKey, appSettings);
+
                 const strId = String(c.id).trim();
                 const childRecords = attendanceData.filter(a => String(a.childId).trim() === strId && !a.isDeleted && a.status !== 'absent');
                 
@@ -583,16 +579,19 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
                 const totalLiturgy = liturgyDates.size;
                 const totalTasbeha = tasbehaDates.size;
 
-                // معالجة وضمان سلامة رابط/بيانات الصورة للإكسيل (< 31000 حرف)
                 let safeProfilePic = "لا توجد صورة";
-                if (c.profilePic) {
-                    safeProfilePic = await ensureExcelSafeImage(c.profilePic, { id: c.id, table: 'children' });
+                if (isValidProfilePic(c.profilePic)) {
+                    const processed = await ensureExcelSafeImage(c.profilePic, { id: c.id, table: 'children' });
+                    safeProfilePic = isValidProfilePic(processed) ? processed : c.profilePic;
                 }
 
                 return {
                     "م": c.id,
                     "كود المخدوم": c.id || "لم يتم إنشاء كود",
-                    "اسم المخدوم": c.name || 'بدون اسم',
+                    "الاسم": c.name || 'بدون اسم',
+                    "كود الفصل": classInfo.syncKey || c.syncKey || "",
+                    "الخدمة التابع لها": classInfo.serviceName,
+                    "الأسرة التابع لها": classInfo.osraName,
                     "النوع": c.gender || 'غير محدد',
                     "رابط الصورة المرفوعة": safeProfilePic,
                     "تاريخ الميلاد": c.birthDate || 'غير مسجل',
@@ -618,14 +617,14 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
                 };
             }));
 
-            // تطهير نهائي لضمان عدم تجاوز أي نص 32,000 حرف مع الحفاظ التام على الصورة الصالحة
             const dataForExcel = rawExcelData.map(row => sanitizeExcelRow(row, "رابط الصورة المرفوعة"));
-
             const worksheet = XLSX.utils.json_to_sheet(dataForExcel);
 
-            // تظبيط عرض العواميد
             const wscols = [
-                { wch: 5 }, { wch: 15 }, { wch: 25 }, { wch: 10 }, { wch: 40 }, { wch: 15 }, { wch: 12 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 35 }, { wch: 18 }, { wch: 18 }, { wch: 22 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 40 }, { wch: 20 }
+                { wch: 15 }, { wch: 15 }, { wch: 28 }, { wch: 18 }, { wch: 22 }, { wch: 22 }, { wch: 10 }, { wch: 40 },
+                { wch: 15 }, { wch: 12 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 18 }, { wch: 20 }, { wch: 35 },
+                { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 22 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 },
+                { wch: 20 }, { wch: 20 }, { wch: 40 }, { wch: 20 }
             ];
             worksheet['!cols'] = wscols;
 
@@ -639,17 +638,50 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
             setIsExporting(false);
         }
     };
+
+    const handleRepairImages = async () => {
+        if (isRepairingImages) return;
+        if (!window.confirm("هل تريد فحص وإصلاح جميع صور المخدومين والخدام وتحويلها إلى نسبة مربعة 1:1 مركزة على الوجه تماماً دون أي مط أو تشويه؟")) {
+            return;
+        }
+        setIsRepairingImages(true);
+        setRepairProgress({ current: 0, total: 0, repairedCount: 0 });
+        try {
+            const result = await repairAllExistingImages((p) => {
+                setRepairProgress(p);
+            });
+            triggerAutoSync();
+            alert(`تم الانتهاء بنجاح! تم فحص ${result.total} صورة وضبط ${result.repairedCount} صورة إلى نسبة 1:1 مربعة تماماً.`);
+        } catch (err) {
+            console.error("خطأ في إصلاح الصور:", err);
+            alert("حدث خطأ أثناء إصلاح بعض الصور.");
+        } finally {
+            setIsRepairingImages(false);
+        }
+    };
+
     const currentSyncKey = localStorage.getItem('currentSyncKey');
     const isMaster = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE' || currentSyncKey === 'STAGE_ADMIN';
     const currentServantObj = JSON.parse(localStorage.getItem('currentServant') || '{}');
-    const className = currentServantObj.stageName || currentServantObj.serviceName || currentServantObj.osraName || appSettings.khedmaName || 'الخدمة المركزية';
+    const resolvedClass = activeClassKey ? resolveChildClassInfo(activeClassKey, appSettings) : null;
+    const className = (resolvedClass?.isKnown ? resolvedClass.osraName : null) || currentServantObj.stageName || currentServantObj.serviceName || currentServantObj.osraName || appSettings.khedmaName || 'الخدمة المركزية';
 
     const handleGlobalReset = async () => {
         if (window.confirm(`هل أنت متأكد من تصفير/مسح بيانات فصل ${className} فقط؟ لن تؤثر هذه العملية على بقية الفصول.`)) {
             if (window.confirm("تأكيد أخير: الداتا هتتمسح ومش هترجع، كمل؟")) {
                 try {
-                    const now = new Date().toISOString();
-                    const updates = childrenData.map(c => db.children.update(c.id, { streak: 0, last_liturgy: null, last_service: null, last_tasbeha: null, last_visited: null, isDirty: true, updatedAt: now }));
+                    const now = Date.now();
+                    const modifier = getCurrentServantModificationName();
+                    const updates = childrenData.map(c => db.children.update(c.id, {
+                        streak: 0,
+                        last_liturgy: null,
+                        last_service: null,
+                        last_tasbeha: null,
+                        last_visited: null,
+                        lastModifiedBy: modifier,
+                        isDirty: true,
+                        updatedAt: now
+                    }));
                     await Promise.all(updates);
                     triggerAutoSync();
                     alert(`تم تصفير العدادات بنجاح لفصل ${className}! 🚀`);
@@ -666,12 +698,17 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
             const pass = prompt(`اكتب كلمة (${appSettings.deletePass}) للتأكيد النهائي:`);
             if (pass === appSettings.deletePass) {
                 try {
-                    const now = new Date().toISOString();
-                    // 🪦 Soft-delete scoped children
-                    const updates = childrenData.map(c => db.children.update(c.id, { isDeleted: true, isDirty: true, updatedAt: now }));
+                    const now = Date.now();
+                    const modifier = getCurrentServantModificationName();
+                    const updates = childrenData.map(c => db.children.update(c.id, {
+                        isDeleted: true,
+                        deletedAt: now,
+                        deletedBy: modifier,
+                        isDirty: true,
+                        updatedAt: now
+                    }));
                     await Promise.all(updates);
                     
-                    // 🪦 Soft-delete scoped attendance
                     const childIds = new Set(childrenData.map(c => String(c.id).trim()));
                     const allAtt = await db.attendance.toArray();
                     const scopedAtt = allAtt.filter(a => childIds.has(String(a.childId).trim()));
@@ -694,8 +731,6 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
 
     return (
         <div className="animate-in slide-in-from-right-8 duration-300 space-y-6">
-
-            {/* 1. الكروت العلوية (ملخص الأرقام) */}
             <div className="grid grid-cols-2 gap-4">
                 <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-100 flex flex-col items-center col-span-2">
                     <Users className="text-indigo-50 mb-1 w-8 h-8" />
@@ -707,7 +742,6 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
                 </div>
             </div>
 
-            {/* 📈 2. مؤشر حضور الشهر (رسم بياني) */}
             <div className="bg-white p-5 rounded-3xl shadow-sm border border-blue-100">
                 <div className="flex items-center justify-between mb-4 border-b border-slate-50 pb-3">
                     <h3 className="text-sm font-black text-slate-800 flex items-center gap-2">
@@ -726,7 +760,6 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
                                     <span>{stat.label} ({stat.date.slice(5)})</span>
                                 </div>
 
-                                {/* بار الخدمة */}
                                 <div className="flex items-center gap-2">
                                     <div className="w-10 text-[9px] font-bold text-indigo-500 text-right">الخدمة:</div>
                                     <div className="flex-1 bg-slate-100 rounded-full h-2.5 overflow-hidden flex">
@@ -737,7 +770,6 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
                                     </div>
                                 </div>
 
-                                {/* بار القداس */}
                                 <div className="flex items-center gap-2">
                                     <div className="w-10 text-[9px] font-bold text-amber-500 text-right">القداس:</div>
                                     <div className="flex-1 bg-slate-100 rounded-full h-2.5 overflow-hidden flex">
@@ -748,7 +780,6 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
                                     </div>
                                 </div>
 
-                                {/* بار التسبحة */}
                                 <div className="flex items-center gap-2">
                                     <div className="w-10 text-[9px] font-bold text-purple-500 text-right">التسبحة:</div>
                                     <div className="flex-1 bg-slate-100 rounded-full h-2.5 overflow-hidden flex">
@@ -759,13 +790,12 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
                                     </div>
                                 </div>
                             </div>
-                        )
+                        );
                     })}
                     {attendanceStats.length === 0 && <p className="text-xs text-center text-slate-400 font-bold py-4">لا توجد جُمع في هذا الشهر بعد.</p>}
                 </div>
             </div>
 
-            {/* 🏡 3. ملخص الافتقاد الزمني (Timeline) */}
             <div className="bg-white p-5 rounded-3xl shadow-sm border border-emerald-100">
                 <h3 className="text-sm font-black text-slate-800 mb-4 border-b border-slate-50 pb-3 flex items-center gap-2">
                     <MapPin className="text-emerald-500 w-5 h-5" /> سجل الافتقاد السريع
@@ -790,10 +820,9 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
                 </div>
             </div>
 
-            {/* 📥 4. تصدير الداتا المتطور (التقسيم الجبار) */}
             <div className="bg-linear-to-br from-green-50 to-emerald-50 p-6 rounded-3xl shadow-sm border border-green-200">
                 <h3 className="text-sm font-black text-green-800 mb-2 flex items-center gap-2"><FileSpreadsheet className="text-green-600 w-5 h-5" /> تصدير الداتا (Excel)</h3>
-                <p className="text-[10px] font-bold text-green-700/80 mb-5">اختر الفئة اللي عايز تطبعها أو تبعتها لخدامها.</p>
+                <p className="text-[10px] font-bold text-green-700/80 mb-5">اختر الفئة اللي عايز تطبعها أو تبعتها لخدامها (الفصل والخدمة مرتبطان مباشرة بكود فصل كل طفل).</p>
 
                 <div className="flex flex-col gap-3">
                     <button onClick={() => handleExport('all')} disabled={isExporting} className="w-full bg-green-600 text-white py-3.5 rounded-xl font-black text-sm hover:bg-green-700 active:scale-95 transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-60">
@@ -809,10 +838,20 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
                             👧 كشف البنات
                         </button>
                     </div>
+
+                    <button onClick={handleRepairImages} disabled={isRepairingImages} className="w-full mt-2 bg-amber-500 hover:bg-amber-600 text-white py-3.5 rounded-xl font-black text-sm active:scale-95 transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-60">
+                        {isRepairingImages ? (
+                            <>
+                                <Loader2 className="animate-spin" size={18} />
+                                <span>جاري إصلاح الصور: {repairProgress.current} / {repairProgress.total}</span>
+                            </>
+                        ) : (
+                            <span>🛠️ إصلاح وضبط جميع الصور الحالية (1:1)</span>
+                        )}
+                    </button>
                 </div>
             </div>
 
-            {/* ⚠️ 5. منطقة الخطر (التنظيف) */}
             {isMaster && (
                 <div className="bg-red-50 p-6 rounded-3xl border border-red-100 mt-10">
                     <h3 className="text-sm font-black text-red-800 mb-1 flex items-center gap-2">
@@ -835,7 +874,7 @@ function StatsView({ childrenData, appSettings, activeClassKey }) {
     );
 }
 
-function KidsManagerView({ childrenData, activeClassKey }) {
+function KidsManagerView({ childrenData, activeClassKey, allOsras = [], appSettings = {} }) {
     const { triggerAutoSync } = useAutoSync();
     const [search, setSearch] = useState("");
     const [genderFilter, setGenderFilter] = useState("all");
@@ -845,7 +884,7 @@ function KidsManagerView({ childrenData, activeClassKey }) {
 
     const emptyChild = {
         name: "", motherPhone: "", fatherPhone: "", childPhone: "", whatsappTarget: "mother",
-        gender: "ولد", address: "", detailedAddress: "", gpsLink: "", birthDate: "", fatherJob: "", specialNotes: "", profilePic: "", fatherConfessor: "", isOrdained: false, ordinationRank: ""
+        gender: "ولد", address: "", detailedAddress: "", gpsLink: "", birthDate: "", fatherJob: "", specialNotes: "", profilePic: "", fatherConfessor: "", isOrdained: false, ordinationRank: "", syncKey: activeClassKey || ""
     };
     const [formChild, setFormChild] = useState(emptyChild);
 
@@ -874,7 +913,7 @@ function KidsManagerView({ childrenData, activeClassKey }) {
             try {
                 const imageResult = await uploadImageToCloudinary(file, 'image');
                 if (imageResult) {
-                    setFormChild(prev => ({ ...prev, profilePic: imageResult }));
+                    setFormChild(prev => ({ ...prev, profilePic: imageResult, photoExplicitlyRemoved: false }));
                     alert(navigator.onLine && imageResult.startsWith('http') ? "✅ تم رفع الصورة بنجاح!" : "✅ تم حفظ الصورة بنجاح (وضع أوفلاين)!");
                 }
             } catch (err) {
@@ -907,84 +946,62 @@ function KidsManagerView({ childrenData, activeClassKey }) {
             }
         }
 
-        const now = new Date().toISOString();
+        const now = Date.now();
+        const modifier = getCurrentServantModificationName();
         const currentSyncKey = localStorage.getItem('currentSyncKey');
-        const targetSyncKey = (editingChild?.syncKey && editingChild.syncKey !== 'MASTER_ACCESS' && editingChild.syncKey !== 'ADMIN_MODE')
-            ? editingChild.syncKey
-            : (activeClassKey || ((currentSyncKey && currentSyncKey !== 'MASTER_ACCESS' && currentSyncKey !== 'ADMIN_MODE') ? currentSyncKey : (formChild.syncKey || '')));
+        const rawTargetKey = formChild.syncKey || editingChild?.syncKey || activeClassKey || (
+            (currentSyncKey && currentSyncKey !== 'MASTER_ACCESS' && currentSyncKey !== 'ADMIN_MODE' && currentSyncKey !== 'STAGE_ADMIN')
+                ? currentSyncKey
+                : ''
+        );
+        const targetSyncKey = normalizeToValidSyncKey(rawTargetKey, appSettings, rawTargetKey);
 
-        const childDataToSave = { ...formChild, birthMonth: bMonth, isDirty: true, updatedAt: now, isDeleted: false, syncKey: targetSyncKey };
+        if (!targetSyncKey) {
+            return alert("يرجى اختيار الفصل / الأسرة التابع لها المخدوم أولاً!");
+        }
+
+        const childDataToSave = {
+            ...formChild,
+            birthMonth: bMonth,
+            syncKey: targetSyncKey,
+            lastModifiedBy: modifier,
+            updatedAt: now,
+            isDirty: true,
+            isDeleted: false
+        };
 
         if (editingChild) {
-            delete childDataToSave.id; // Strictly ensure ID cannot be updated
-            await db.children.update(editingChild.id, childDataToSave);
+            delete childDataToSave.id;
+            await saveAndSyncChildEdit(editingChild.id, childDataToSave, modifier);
             setEditingChild(null);
         } else {
             const newId = generateChildId(formChild.gender);
-            
-            await db.children.add({ ...childDataToSave, id: newId, streak: 0, gotClothes: false });
+            await db.children.put({
+                ...childDataToSave,
+                id: newId,
+                streak: 0,
+                gotClothes: false,
+                lastModifiedBy: modifier,
+                updatedAt: now,
+                isDirty: true,
+                isDeleted: false
+            });
             setIsAdding(false);
         }
         setFormChild(emptyChild);
         triggerAutoSync();
-        alert("تم الحفظ بنجاح! ✅");
+        alert("تم الحفظ والمزامنة بنجاح! ✅");
     };
 
     const handleDelete = async (id) => {
-        if (!window.confirm("متأكد إنك عايز تمسح المخدوم ده نهائياً؟")) return;
+        if (!window.confirm("متأكد إنك عايز تمسح المخدوم ده؟")) return;
 
-        const now = new Date().toISOString();
         try {
-            const child = await db.children.get(id);
-            const targetKey = child?.syncKey || currentSyncKey;
-
-            // 1. Soft-delete locally first so Dexie useLiveQuery filters it out immediately
-            await db.children.update(id, { isDeleted: true, isDirty: true, updatedAt: now });
-
-            // Also soft-delete linked attendance and grades safely
-            try {
-                const strId = String(id).trim();
-                if (strId) {
-                    await db.attendance.where('childId').equals(strId).modify({ isDeleted: true, isDirty: true, updatedAt: now });
-                    await db.grades.where('childId').equals(strId).modify({ isDeleted: true, isDirty: true, updatedAt: now });
-                    const numId = Number(strId);
-                    if (!isNaN(numId) && Number.isFinite(numId)) {
-                        await db.attendance.where('childId').equals(numId).modify({ isDeleted: true, isDirty: true, updatedAt: now });
-                        await db.grades.where('childId').equals(numId).modify({ isDeleted: true, isDirty: true, updatedAt: now });
-                    }
-                }
-            } catch (modErr) {
-                console.warn('⚠️ [handleDelete] Note during local soft-delete modification:', modErr?.message);
-            }
-
-            // 2. Direct Firestore Deletion: Immediately remove document from Firestore if online
-            if (navigator.onLine && targetKey && targetKey !== 'MASTER_ACCESS' && targetKey !== 'ADMIN_MODE' && targetKey !== 'STAGE_ADMIN') {
-                const childDocRef = doc(firestore, 'Osras', targetKey, 'children', String(id));
-                await deleteDoc(childDocRef);
-
-                // Clean up any cloud attendance documents for this child
-                try {
-                    const attSnap = await getDocs(collection(firestore, 'Osras', targetKey, 'attendance'));
-                    const attToDelete = (attSnap.docs || []).filter(d => d.id.includes(`_${id}_`));
-                    await Promise.all(attToDelete.map(d => deleteDoc(d.ref)));
-                } catch (attErr) {
-                    console.warn("⚠️ [handleDelete] Attendance cloud cleanup note:", attErr);
-                }
-
-                // Hard-purge from local database now that cloud confirmed deletion
-                await safePurgeLocalChild(id);
-
-                console.log(`✅ [handleDelete] Child ${id} removed directly from Firestore and Dexie.`);
-            } else {
-                // If offline or special admin key, trigger background auto-sync to push tombstone upon reconnection
-                triggerAutoSync();
-            }
+            const modifier = getCurrentServantModificationName();
+            await softDeleteChildWithSync(id, modifier);
+            triggerAutoSync();
         } catch (error) {
             console.error("❌ [handleDelete] Error during deletion:", error);
-            // Ensure child is marked dirty/deleted locally so background sync retries
-            try {
-                await db.children.update(id, { isDeleted: true, isDirty: true, updatedAt: now });
-            } catch (_) {}
             triggerAutoSync();
         }
     };
@@ -1003,7 +1020,7 @@ function KidsManagerView({ childrenData, activeClassKey }) {
                                 {isCompressingImage ? (
                                     <div className="flex flex-col items-center text-indigo-500"><Loader2 className="animate-spin mb-1" size={28} /><span className="text-[10px] font-black">جاري الضغط</span></div>
                                 ) : formChild.profilePic ? (
-                                    <img src={formChild.profilePic} onError={handleImageError} className="w-full h-full object-cover" alt="Profile" />
+                                    <img src={getAvatarUrl(formChild.profilePic)} onError={handleImageError} className="w-full h-full object-cover" alt="Profile" />
                                 ) : (
                                     <Camera className="text-slate-400 group-hover:text-indigo-500 transition-colors" size={36} />
                                 )}
@@ -1017,6 +1034,25 @@ function KidsManagerView({ childrenData, activeClassKey }) {
                             <label className="text-xs font-bold text-slate-500 ml-1">الاسم رباعي *</label>
                             <input type="text" value={formChild.name || ''} onChange={e => setFormChild({ ...formChild, name: e.target.value })} className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold focus:ring-2 focus:ring-indigo-400" required />
                         </div>
+
+                        {allOsras.length > 0 && (
+                            <div className="space-y-1 md:col-span-2">
+                                <label className="text-xs font-bold text-indigo-600 ml-1">الفصل / الأسرة التابع لها *</label>
+                                <select
+                                    value={formChild.syncKey || editingChild?.syncKey || activeClassKey || ''}
+                                    onChange={e => setFormChild({ ...formChild, syncKey: e.target.value })}
+                                    className="w-full p-4 bg-indigo-50 border border-indigo-200 rounded-xl font-black text-indigo-900 focus:ring-2 focus:ring-indigo-500"
+                                    required
+                                >
+                                    <option value="">-- اختر الفصل / الأسرة --</option>
+                                    {allOsras.map(osra => (
+                                        <option key={osra.syncKey} value={osra.syncKey}>
+                                            {osra.stage ? `${osra.stage} - ` : ''}{osra.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                        )}
 
                         <div className="space-y-1">
                             <label className="text-xs font-bold text-slate-500 ml-1">النوع</label>
@@ -1138,13 +1174,13 @@ function KidsManagerView({ childrenData, activeClassKey }) {
                         <Search className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                         <input type="text" placeholder="ابحث لتعديل البيانات..." value={search} onChange={(e) => setSearch(e.target.value)} className="w-full pr-10 pl-4 py-3 rounded-2xl bg-white border border-slate-200 font-bold focus:ring-2 focus:ring-indigo-500 shadow-sm" />
                     </div>
-                    <button onClick={() => { setFormChild(emptyChild); setIsAdding(true); }} aria-label="إضافة مخدوم جديد" className="bg-indigo-600 text-white w-12 h-12 rounded-2xl flex items-center justify-center shadow-md shrink-0 hover:bg-indigo-700 transition-colors">
+                    <button onClick={() => { setFormChild({ ...emptyChild, syncKey: activeClassKey || '' }); setIsAdding(true); }} aria-label="إضافة مخدوم جديد" className="bg-indigo-600 text-white w-12 h-12 rounded-2xl flex items-center justify-center shadow-md shrink-0 hover:bg-indigo-700 transition-colors">
                         <UserPlus size={20} />
                     </button>
                 </div>
 
                 <div className="flex gap-2 justify-center">
-                    {[{ id: "boys", label: "ولاد 👦" }, { id: "girls", label: "بنات 👧" }].map(f => (
+                    {[{ id: "all", label: "الكل 🌟" }, { id: "boys", label: "ولاد 👦" }, { id: "girls", label: "بنات 👧" }].map(f => (
                         <button key={f.id} onClick={() => setGenderFilter(f.id)} className={`flex-1 px-4 py-2.5 rounded-xl text-xs font-black transition-all ${genderFilter === f.id ? "bg-indigo-600 text-white shadow-md" : "bg-white text-slate-500 border border-slate-100"}`}>{f.label}</button>
                     ))}
                 </div>
@@ -1154,33 +1190,38 @@ function KidsManagerView({ childrenData, activeClassKey }) {
                 {filtered.length === 0 ? (
                     <div className="text-center py-10 text-slate-400 font-bold bg-white rounded-3xl border border-dashed border-slate-200">لا يوجد مخدومين بهذا الاسم.</div>
                 ) : (
-                    filtered.slice(0, 50).map(child => (
-                        <div key={child.id} className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-3">
-                            <div className="flex justify-between items-start">
-                                <div className="flex items-center gap-3">
-                                    <div className="relative w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center text-xl overflow-hidden shadow-inner">
-                                        {child.profilePic ? <img src={child.profilePic} width="48" height="48" loading="lazy" onError={handleImageError} className="w-full h-full object-cover" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
-
-                                    </div>
-                                    <div>
-                                        <h3 className="font-black text-sm text-slate-800">{child.name}</h3>
-                                        <p className="text-[10px] font-bold text-slate-500 mt-0.5 flex gap-2">
-                                            <span className="flex items-center gap-0.5"><MapPin size={10} /> {child.address || 'بدون منطقة'}</span>
-                                            <span className="flex items-center gap-0.5"><Phone size={10} /> {getDisplayPhone(child)}</span>
-                                        </p>
+                    filtered.map(child => {
+                        const cInfo = resolveChildClassInfo(child.syncKey, appSettings);
+                        return (
+                            <div key={child.id} className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-3">
+                                <div className="flex justify-between items-start">
+                                    <div className="flex items-center gap-3">
+                                        <div className="relative w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center text-xl overflow-hidden shadow-inner">
+                                            {child.profilePic ? <img src={getAvatarUrl(child.profilePic)} width="48" height="48" loading="lazy" onError={handleImageError} className="w-full h-full object-cover" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
+                                        </div>
+                                        <div>
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <h3 className="font-black text-sm text-slate-800">{child.name}</h3>
+                                                <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-md text-[10px] font-black">
+                                                    {cInfo.osraName}
+                                                </span>
+                                            </div>
+                                            <p className="text-[10px] font-bold text-slate-500 mt-0.5 flex gap-2 flex-wrap">
+                                                <span className="flex items-center gap-0.5"><MapPin size={10} /> {child.address || 'بدون منطقة'}</span>
+                                                <span className="flex items-center gap-0.5"><Phone size={10} /> {getDisplayPhone(child)}</span>
+                                            </p>
+                                        </div>
                                     </div>
                                 </div>
+                                <div className="flex gap-2 border-t border-slate-50 pt-3 mt-1">
+                                    <button onClick={() => { setEditingChild(child); setFormChild(child); }} className="flex-1 bg-slate-50 text-indigo-600 py-2 rounded-xl text-xs font-black flex items-center justify-center gap-1 hover:bg-indigo-50"><Edit3 size={14} /> تعديل شامل</button>
+                                    <button onClick={() => handleDelete(child.id)} className="flex-1 bg-slate-50 text-red-600 py-2 rounded-xl text-xs font-black flex items-center justify-center gap-1 hover:bg-red-50"><Trash2 size={14} /> مسح</button>
+                                </div>
                             </div>
-                            <div className="flex gap-2 border-t border-slate-50 pt-3 mt-1">
-                                <button onClick={() => { setEditingChild(child); setFormChild(child); }} className="flex-1 bg-slate-50 text-indigo-600 py-2 rounded-xl text-xs font-black flex items-center justify-center gap-1 hover:bg-indigo-50"><Edit3 size={14} /> تعديل شامل</button>
-                                <button onClick={() => handleDelete(child.id)} className="flex-1 bg-slate-50 text-red-600 py-2 rounded-xl text-xs font-black flex items-center justify-center gap-1 hover:bg-red-50"><Trash2 size={14} /> مسح</button>
-                            </div>
-                        </div>
-                    ))
+                        );
+                    })
                 )}
             </div>
         </div>
     );
 }
-
-

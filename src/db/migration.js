@@ -2,7 +2,7 @@ import { db } from './database';
 import { firestore } from './firebase';
 import { collection, collectionGroup, getDocs, doc, setDoc, deleteDoc, getDoc } from 'firebase/firestore';
 import { encryptData, decryptData } from '../encryption';
-import { generateChildId, isCleanChildId } from '../utils/idGenerator';
+import { ensureCleanChildId, isCleanChildId } from '../utils/idGenerator';
 
 // Helper to clean undefined fields before Firestore write
 const cleanData = (obj) => {
@@ -43,7 +43,7 @@ export async function runLocalIdMigration() {
 
         for (const child of malformedChildren) {
             const oldId = String(child.id);
-            const newId = generateChildId(child.gender, undefined, existingIds);
+            const newId = ensureCleanChildId(oldId, child.gender, undefined, existingIds);
             existingIds.add(newId);
 
             console.log(`  🔄 [Local] Migrating child "${child.name}": ${oldId} ➔ ${newId}`);
@@ -149,22 +149,22 @@ export async function runCloudIdMigration(localIdMap = new Map()) {
                 if (localIdMap.has(docSnap.id)) {
                     newId = localIdMap.get(docSnap.id).newId;
                 } else {
-                    newId = generateChildId(childData.gender);
+                    newId = ensureCleanChildId(docSnap.id, childData.gender);
                 }
 
                 fullMigrationMap.set(docSnap.id, { newId, child: childData, syncKey });
 
                 console.log(`  ☁️ [Cloud] Migrating document in Osra (${syncKey}): ${docSnap.id} ➔ ${newId}`);
 
-                // Write new document with clean ID
+                // Write new document with clean ID (preserving isDeleted and profilePic)
                 const newDocRef = doc(firestore, 'Osras', syncKey, 'children', newId);
                 const cloudPayload = encryptData(cleanData({
                     ...childData,
                     id: newId,
                     syncKey,
                     isDirty: false,
-                    isDeleted: false,
-                    updatedAt: now
+                    isDeleted: Boolean(childData.isDeleted),
+                    updatedAt: childData.updatedAt || now
                 }));
                 await setDoc(newDocRef, { payload: cloudPayload }, { merge: true });
 

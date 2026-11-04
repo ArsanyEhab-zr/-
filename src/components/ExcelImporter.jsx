@@ -1,11 +1,16 @@
 import React, { useState } from 'react';
 import * as XLSX from 'xlsx';
 import { db } from '../db/database';
-import { FileSpreadsheet, Loader2, Upload } from 'lucide-react';
+import { Loader2, Upload } from 'lucide-react';
 
 import useAutoSync from '../hooks/useAutoSync';
-import { generateChildId, isCleanChildId, ensureCleanChildId } from '../utils/idGenerator';
-import { ensureExcelSafeImage } from '../utils/imageUtils';
+import { isCleanChildId, ensureCleanChildId } from '../utils/idGenerator';
+import { ensureExcelSafeImage, isValidProfilePic, resolveProtectedProfilePic } from '../utils/imageUtils';
+import {
+    areStrictDuplicateChildren,
+    normalizeToValidSyncKey
+} from '../utils/nameUtils';
+import { getCurrentServantModificationName } from '../db/sync';
 
 export default function ExcelImporter() {
     const [isImporting, setIsImporting] = useState(false);
@@ -26,11 +31,9 @@ export default function ExcelImporter() {
         let bMonth = null;
         let bDay = null;
 
-        // 1. محاولة استخراج الشهر المكتوب بالعربي
         for (const [monthName, monthNum] of Object.entries(arabicMonths)) {
             if (str.includes(monthName)) {
                 bMonth = monthNum;
-                // استخراج اليوم (أول رقم موجود في النص)
                 const match = str.match(/\d{1,2}/);
                 if (match) {
                     bDay = parseInt(match[0], 10);
@@ -39,14 +42,12 @@ export default function ExcelImporter() {
             }
         }
 
-        // 2. لو مفيش شهر عربي، نحاول نقرأ التواريخ الرقمية (زي 25/11/2014 أو 28-7-2016)
         if (!bMonth) {
             const parts = str.split(/[-/]/);
             if (parts.length >= 2) {
                 const p1 = parseInt(parts[0], 10);
                 const p2 = parseInt(parts[1], 10);
 
-                // بنفترض إن التنسيق يوم/شهر
                 if (p2 >= 1 && p2 <= 12 && p1 >= 1 && p1 <= 31) {
                     bDay = p1;
                     bMonth = p2;
@@ -59,7 +60,6 @@ export default function ExcelImporter() {
 
         return { bMonth, bDay };
     };
-
 
     const handleFileUpload = (e) => {
         const file = e.target.files?.[0];
@@ -89,20 +89,27 @@ export default function ExcelImporter() {
                 }
 
                 const existingChildren = await db.children.toArray();
-                const syncKey = localStorage.getItem('currentSyncKey');
-                const now = new Date().toISOString();
+                const currentSyncKey = localStorage.getItem('currentSyncKey') || '';
+                const appSettings = JSON.parse(localStorage.getItem('appSettings') || '{}');
+                const now = Date.now();
+                const modifierName = getCurrentServantModificationName();
 
-                // فلترة الصفوف الفارغة وتعقيم البيانات وإسناد Primary Key صالح ومؤكد
+                const fallbackSyncKey = (
+                    currentSyncKey &&
+                    currentSyncKey !== 'MASTER_ACCESS' &&
+                    currentSyncKey !== 'ADMIN_MODE' &&
+                    currentSyncKey !== 'STAGE_ADMIN'
+                ) ? currentSyncKey : '';
+
                 const sanitizedRows = [];
                 const trimStr = (val) => (val !== null && val !== undefined ? String(val).trim() : "");
 
                 for (let idx = 0; idx < jsonData.length; idx++) {
                     const row = jsonData[idx];
-                    const excelRowNum = idx + 2; // +2 لأن رأس الجدول في الإكسيل هو السطر 1
+                    const excelRowNum = idx + 2;
 
                     if (!row || typeof row !== 'object') continue;
 
-                    // استبعاد الصفوف الفارغة تماماً
                     const hasNonEmptyValue = Object.values(row).some(
                         v => v !== null && v !== undefined && String(v).trim() !== ''
                     );
@@ -110,21 +117,18 @@ export default function ExcelImporter() {
 
                     const rawName = row["name"] || row["الاسم"];
                     const name = trimStr(rawName);
-
-                    // استبعاد الصفوف التي تفتقر للاسم الأساسي
                     if (!name) continue;
 
-                    // استخراج الـ ID الأصلي أو الكود إن كان نظيفاً ومطابقاً للنمط، وإلا تركه لتوليد ID مهيكل نظيف
                     const rawId = trimStr(
-                        row["id"] || 
-                        row["ID"] || 
-                        row["code"] || 
-                        row["Code"] || 
-                        row["كود"] || 
+                        row["id"] ||
+                        row["ID"] ||
+                        row["code"] ||
+                        row["Code"] ||
+                        row["كود"] ||
                         row["كود المخدوم"]
                     );
 
-                    const primaryKey = isCleanChildId(rawId) ? rawId : null;
+                    const primaryKey = isCleanChildId(rawId) ? rawId : (rawId && rawId !== "لم يتم إنشاء كود" ? rawId : null);
 
                     const rawBirthDate = trimStr(row["birthDate"] || row["تاريخ الميلاد"]);
                     const { bMonth, bDay } = parseArabicDate(rawBirthDate);
@@ -132,10 +136,20 @@ export default function ExcelImporter() {
                     const genderRaw = trimStr(row["gender"] || row["النوع"]).toLowerCase();
                     const gender = (genderRaw === "بنت" || genderRaw === "girl" || genderRaw === "female") ? "بنت" : "ولد";
 
-                    const rowSyncKey = trimStr(row["syncKey"] || row["الفصل"] || row["كود الفصل"] || row["أسرة"] || row["الأسرة"]);
-                    const effectiveSyncKey = rowSyncKey || (
-                        (syncKey && syncKey !== 'MASTER_ACCESS' && syncKey !== 'ADMIN_MODE' && syncKey !== 'STAGE_ADMIN') ? syncKey : ''
+                    // حل الفصل بدقة من كود الفصل أو اسم الأسرة التابع لها مقابل appSettings.osras
+                    const rawClassCandidate = trimStr(
+                        row["كود الفصل"] ||
+                        row["syncKey"] ||
+                        row["الأسرة التابع لها"] ||
+                        row["الفصل"] ||
+                        row["الأسرة"] ||
+                        row["أسرة"]
                     );
+                    const effectiveSyncKey = normalizeToValidSyncKey(rawClassCandidate, appSettings, fallbackSyncKey);
+
+                    // حماية الصورة من كلمة "لا توجد صورة" أو القيم الفارغة
+                    const rawRowPic = trimStr(row["profilePic"] || row["رابط الصورة المرفوعة"]);
+                    const validRowPic = isValidProfilePic(rawRowPic) ? rawRowPic : "";
 
                     sanitizedRows.push({
                         excelRowNum,
@@ -150,27 +164,28 @@ export default function ExcelImporter() {
                             whatsappTarget: trimStr(row["whatsappTarget"]) || "mother",
                             gender,
                             address: trimStr(row["address"] || row["المنطقة"]),
-                            detailedAddress: trimStr(row["detailedAddress"] || row["العنوان"]),
+                            detailedAddress: trimStr(row["detailedAddress"] || row["العنوان بالتفصيل"] || row["العنوان"]),
                             gpsLink: trimStr(row["gpsLink"] || row["موقع البيت"]),
-                            profilePic: trimStr(row["profilePic"] || row["رابط الصورة المرفوعة"]),
+                            profilePic: validRowPic,
                             birthDate: rawBirthDate,
                             birthMonth: bMonth,
                             birthDay: bDay,
                             fatherJob: trimStr(row["fatherJob"] || row["وظيفة الأب"]),
-                            specialNotes: trimStr(row["specialNotes"] || row["ملاحظات"]),
+                            specialNotes: trimStr(row["specialNotes"] || row["ملاحظات هامة"] || row["ملاحظات"]),
                             fatherConfessor: trimStr(row["fatherConfessor"] || row["أب الاعتراف"]),
                             isOrdained: row["isOrdained"] === true || String(row["isOrdained"]).toUpperCase() === "TRUE" || trimStr(row["مرسوم شماس"]) === "نعم",
                             ordinationRank: trimStr(row["ordinationRank"] || row["الرتبة الشماسية"]),
-                            streak: Number(row["المواظبة"] || row["streak"] || 0) || 0,
+                            streak: Number(row["المواظبة (مرات الحضور)"] || row["المواظبة"] || row["streak"] || 0) || 0,
                             last_liturgy: null,
                             last_service: null,
-                            last_tasbeha: trimStr(row["last_tasbeha"] || row["آخر حضور تسبحة"]) || null,
+                            last_tasbeha: (trimStr(row["last_tasbeha"] || row["آخر حضور تسبحة"]) !== "لم يحضر" && trimStr(row["last_tasbeha"] || row["آخر حضور تسبحة"])) || null,
                             last_visited: null,
                             last_birthday_gift: null,
                             last_reward_date: null,
                             isBrother: false,
                             gotClothes: false,
                             isDirty: true,
+                            lastModifiedBy: modifierName,
                             updatedAt: now,
                             isDeleted: false,
                             massAttendance: 0,
@@ -192,32 +207,52 @@ export default function ExcelImporter() {
 
                 let successCount = 0;
                 const errorRows = [];
-
                 const existingIds = new Set(existingChildren.map(c => c.id).filter(Boolean));
 
                 for (const { excelRowNum, childData } of sanitizedRows) {
                     try {
-                        const existingChild = existingChildren.find(c => 
-                            (childData.id && c.id === childData.id) || 
-                            (c.name && childData.name && c.name.trim() === childData.name.trim())
-                        );
+                        // مطابقة صارمة فقط: إما نفس الكود بالضبط، أو نفس الفصل + اسم رباعي كامل متطابق + نفس رقم التليفون غير الفارغ
+                        const existingChild = existingChildren.find(c => {
+                            if (childData.id && String(c.id) === String(childData.id)) {
+                                return true;
+                            }
+                            return areStrictDuplicateChildren(childData, c, childData.syncKey);
+                        });
 
-                        const rawPic = childData.profilePic || (existingChild ? existingChild.profilePic : "");
-                        const safePic = rawPic ? await ensureExcelSafeImage(rawPic) : "";
+                        // حماية الصورة بحيث لا تمسح الصورة القديمة أبداً إذا كان الشيت بدون صورة
+                        const protectedPic = resolveProtectedProfilePic(childData, existingChild);
+                        let safePic = "";
+                        if (isValidProfilePic(protectedPic)) {
+                            const processed = await ensureExcelSafeImage(protectedPic);
+                            safePic = isValidProfilePic(processed) ? processed : protectedPic;
+                        }
 
                         if (existingChild) {
                             const finalId = ensureCleanChildId(existingChild.id, childData.gender, undefined, existingIds);
-                            const updated = { 
-                                ...existingChild, 
-                                ...childData, 
+                            const resolvedSyncKey = childData.syncKey || existingChild.syncKey || fallbackSyncKey;
+                            const oldSyncKey = (existingChild.syncKey && resolvedSyncKey && existingChild.syncKey !== resolvedSyncKey)
+                                ? existingChild.syncKey
+                                : (existingChild.oldSyncKey || null);
+
+                            const updated = {
+                                ...existingChild,
+                                ...childData,
+                                id: finalId,
+                                syncKey: resolvedSyncKey,
+                                oldSyncKey,
+                                movedTo: null,
                                 profilePic: safePic,
                                 streak: childData.streak || existingChild.streak || 0,
                                 last_liturgy: existingChild.last_liturgy || null,
                                 last_service: existingChild.last_service || null,
                                 last_tasbeha: childData.last_tasbeha || existingChild.last_tasbeha || null,
                                 last_visited: existingChild.last_visited || null,
-                                id: finalId, 
-                                isDeleted: false 
+                                lastModifiedBy: modifierName,
+                                updatedAt: now,
+                                isDirty: true,
+                                isDeleted: false,
+                                deletedAt: null,
+                                deletedBy: null
                             };
                             if (existingChild.id !== finalId) {
                                 await db.children.delete(existingChild.id);
@@ -228,8 +263,11 @@ export default function ExcelImporter() {
                             const finalId = ensureCleanChildId(childData.id, childData.gender, undefined, existingIds);
                             childData.id = finalId;
                             childData.profilePic = safePic;
+                            childData.updatedAt = now;
+                            childData.lastModifiedBy = modifierName;
+                            childData.isDirty = true;
                             existingIds.add(finalId);
-                            await db.children.add(childData);
+                            await db.children.put(childData);
                             existingChildren.push({ ...childData });
                         }
                         successCount++;
@@ -252,7 +290,7 @@ export default function ExcelImporter() {
                     const remainingNotice = errorRows.length > 5 ? `\n... و ${errorRows.length - 5} صفوف أخرى.` : '';
                     alert(`تم استيراد وتحديث ${successCount} مخدوم بنجاح! ⚠️\nتم تخطي ${errorRows.length} صف بسبب أخطاء:\n${sampleErrors}${remainingNotice}`);
                 } else {
-                    alert(`مبروك! تم استيراد وتحديث ${successCount} مخدوم بنجاح (بما فيها أعياد الميلاد)! 🎉`);
+                    alert(`مبروك! تم استيراد وتحديث ${successCount} مخدوم بنجاح مع الحفاظ الكامل على الصور والفصول! 🎉`);
                 }
 
                 if (successCount > 0) {

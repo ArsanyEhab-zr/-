@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import * as XLSX from 'xlsx';
 import { db } from '../db/database';
 import { Download, Loader2 } from 'lucide-react';
-import { ensureExcelSafeImage, sanitizeExcelRow } from '../utils/imageUtils';
+import { ensureExcelSafeImage, sanitizeExcelRow, isValidProfilePic } from '../utils/imageUtils';
+import { resolveChildClassInfo } from '../utils/nameUtils';
 
 export default function ExcelExporter() {
     const [isExporting, setIsExporting] = useState(false);
@@ -10,7 +11,7 @@ export default function ExcelExporter() {
     const handleExport = async () => {
         setIsExporting(true);
         try {
-            // 1. 🔐 جلب أطفال الأسرة الحالية بس من قاعدة البيانات مع استبعاد المحذوفين
+            // 1. 🔐 جلب أطفال الأسرة الحالية من قاعدة البيانات مع استبعاد المحذوفين
             const currentSyncKey = String(localStorage.getItem('currentSyncKey') || '');
             const isMaster = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE';
             const currentServantObj = JSON.parse(localStorage.getItem('currentServant') || '{}');
@@ -34,35 +35,27 @@ export default function ExcelExporter() {
                 return;
             }
 
-            // 2. جلب إعدادات الأسر والخدمات من الـ LocalStorage عشان نترجم الـ syncKey لأسماء حقيقية
-            const appSettings = JSON.parse(localStorage.getItem('appSettings')) || {};
-            const services = appSettings.services || [];
+            // 2. جلب إعدادات الأسر والخدمات من الـ LocalStorage (System/mainConfig) كمصدر وحيد للحقيقة
+            const appSettings = JSON.parse(localStorage.getItem('appSettings') || '{}');
 
-            // 3. تجهيز الداتا للإكسيل بطريقة شيك ومفهومة وضمان أن الصور نصوص صالحة < 31,000 حرف
+            // 3. تجهيز الداتا للإكسيل مع حل الفصل حصرياً من child.syncKey وحماية الصور
             const rawExcelData = await Promise.all(children.map(async (child) => {
+                // 🔍 المصدر الوحيد للحقيقة لاسم الفصل والخدمة بناءً على child.syncKey
+                const classInfo = resolveChildClassInfo(child.syncKey, appSettings);
+                const osraName = classInfo.osraName;
+                const khedmaName = classInfo.serviceName;
 
-                // 🔍 البحث عن اسم الأسرة والخدمة بناءً على مفتاح الطفل
-                let osraName = "غير محدد";
-                let khedmaName = "غير محدد";
-
-                services.forEach(service => {
-                    const foundOsra = (service.osras || []).find(o => String(o.syncKey).trim() === String(child.syncKey).trim());
-                    if (foundOsra) {
-                        osraName = foundOsra.name;
-                        khedmaName = service.name;
-                    }
-                });
-
-                // معالجة الصورة لضمان ملاءمتها لحدود خلية الإكسيل (32767 حرف) دون حذفها، وحفظها محلياً لتسريع المرات القادمة
+                // معالجة الصورة مع حماية كاملة من المسح عند أي خطأ في فك التشفير أو الشبكة
                 let safeProfilePic = "لا توجد صورة";
-                if (child.profilePic) {
-                    safeProfilePic = await ensureExcelSafeImage(child.profilePic, { id: child.id, table: 'children' });
+                if (isValidProfilePic(child.profilePic)) {
+                    const processed = await ensureExcelSafeImage(child.profilePic, { id: child.id, table: 'children' });
+                    safeProfilePic = isValidProfilePic(processed) ? processed : child.profilePic;
                 }
 
                 return {
                     "كود المخدوم": child.id || "لم يتم إنشاء كود",
                     "الاسم": child.name || "",
-                    "كود الفصل": child.syncKey || "",
+                    "كود الفصل": classInfo.syncKey || child.syncKey || "",
                     "النوع": child.gender || "",
                     "رابط الصورة المرفوعة": safeProfilePic,
                     "الخدمة التابع لها": khedmaName,
@@ -93,15 +86,15 @@ export default function ExcelExporter() {
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, worksheet, "بيانات المخدومين");
 
-            // تظبيط عرض العواميد عشان الكلام يبان
             const wscols = [
                 { wch: 15 }, // كود المخدوم
                 { wch: 30 }, // الاسم
+                { wch: 18 }, // كود الفصل
                 { wch: 10 }, // النوع
                 { wch: 40 }, // رابط الصورة المرفوعة
                 { wch: 25 }, // الخدمة التابع لها
                 { wch: 25 }, // الأسرة التابع لها
-                { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, // التليفونات (الأم، الأب، المخدوم، آخر)
+                { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, // التليفونات
                 { wch: 15 }, // تاريخ الميلاد
                 { wch: 20 }, // المنطقة
                 { wch: 40 }, // العنوان بالتفصيل
@@ -111,7 +104,7 @@ export default function ExcelExporter() {
                 { wch: 40 }, // ملاحظات هامة
                 { wch: 25 }, // أب الاعتراف
                 { wch: 15 }, // مرسوم شماس
-                { wch: 25 },  // الرتبة الشماسية
+                { wch: 25 }, // الرتبة الشماسية
                 { wch: 20 }  // بيانات الـ QR
             ];
             worksheet['!cols'] = wscols;

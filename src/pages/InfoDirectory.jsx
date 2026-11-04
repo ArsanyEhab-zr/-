@@ -4,7 +4,7 @@ import { db } from '../db/database';
 import { Link } from 'react-router-dom';
 import { Search, Phone, Info, ChevronLeft, Gift, Cake } from 'lucide-react';
 import BottomNav from '../components/BottomNav';
-import { handleImageError } from '../utils/imageUtils';
+import { handleImageError, getAvatarUrl } from '../utils/imageUtils';
 
 export default function InfoDirectory() {
     const [activeFilter, setActiveFilter] = useState("all");
@@ -69,6 +69,7 @@ export default function InfoDirectory() {
     };
 
     const filteredChildren = children?.filter((c) => {
+        if (!c || c.isDeleted) return false;
         // فلتر النوع
         if (activeFilter === "boys" && c.gender === "بنت") return false;
         if (activeFilter === "girls" && c.gender !== "بنت") return false;
@@ -142,15 +143,14 @@ export default function InfoDirectory() {
                         <div className="col-span-full text-center py-10 text-slate-400 font-bold border-2 border-dashed border-slate-200 rounded-3xl">لا يوجد مخدومين مطابقين للبحث.</div>
                     ) : (
                         filteredChildren.map(child => {
-                            const isBday = isBirthdayToday(child.birthDate); // 🥳 فحص عيد الميلاد
+                            const isBday = isBirthdayToday(child.birthDate);
 
                             return (
                                 <Link key={child.id} to={`/info/${child.id}`} className={`p-4 rounded-3xl shadow-sm border flex items-center gap-4 transition-all relative overflow-hidden ${isBday ? 'bg-linear-to-l from-yellow-50 to-amber-100 border-yellow-400 shadow-yellow-200/50 scale-[1.02]' : 'bg-white border-slate-100 hover:border-emerald-200'}`}>
-                                    {/* شريط الإضاءة لو عيد ميلاده */}
                                     {isBday && <div className="absolute top-0 left-0 w-full h-1.5 bg-linear-to-r from-yellow-400 via-pink-500 to-yellow-400 animate-pulse"></div>}
 
                                     <div className={`w-14 h-14 rounded-full flex items-center justify-center text-2xl overflow-hidden shadow-inner ${isBday ? 'bg-yellow-200 border-2 border-yellow-400' : 'bg-slate-100'}`}>
-                                        {child.profilePic ? <img src={child.profilePic} onError={handleImageError} className="object-cover w-full h-full" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
+                                        {child.profilePic ? <img src={getAvatarUrl(child.profilePic)} onError={handleImageError} className="object-cover w-full h-full" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
                                     </div>
 
                                     <div className="flex-1">
@@ -162,7 +162,6 @@ export default function InfoDirectory() {
                                             <Phone size={10} /> {getDisplayPhone(child)}
                                         </p>
 
-                                        {/* 🌟 إظهار تاريخ الميلاد وتنويره لو النهارده */}
                                         {child.birthDate && (
                                             <p className={`text-[10px] font-black mt-1.5 flex items-center gap-1 w-fit px-2 py-0.5 rounded-lg ${isBday ? 'bg-pink-500 text-white shadow-sm' : 'bg-slate-100 text-slate-500'}`}>
                                                 <Gift size={10} /> {child.birthDate} {isBday && ' (النهارده!)'}

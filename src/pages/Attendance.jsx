@@ -7,7 +7,7 @@ import { db } from '../db/database';
 import { Search, Church, BookOpen, CheckCheck, X, MessageCircleWarning, History, UserMinus, UserCheck, Calendar, Music } from 'lucide-react';
 import useAutoSync from '../hooks/useAutoSync';
 import BottomNav from '../components/BottomNav';
-import { handleImageError } from '../utils/imageUtils';
+import { handleImageError, getAvatarUrl } from '../utils/imageUtils';
 
 export default function Attendance() {
     const { triggerAutoSync } = useAutoSync();
@@ -271,7 +271,7 @@ export default function Attendance() {
                     {filteredChildren.map(child => (
                         <div key={child.id} className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 flex flex-col gap-4 hover:shadow-md transition-shadow">
                             <div className="flex items-center gap-3">
-                                <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center text-xl overflow-hidden ring-2 ring-slate-50">{child.profilePic ? <img src={child.profilePic} alt={child.name || ''} onError={handleImageError} className="object-cover w-full h-full" /> : (child.gender === 'بنت' ? '👧' : '👦')}</div>
+                                <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center text-xl overflow-hidden ring-2 ring-slate-50">{child.profilePic ? <img src={getAvatarUrl(child.profilePic)} alt={child.name || ''} onError={handleImageError} className="object-cover w-full h-full" /> : (child.gender === 'بنت' ? '👧' : '👦')}</div>
                                 <div>
                                     <h3 className="font-black text-slate-800 text-sm">{child.name || 'بدون اسم'}</h3>
                                     <p className={`text-[10px] px-2 py-0.5 rounded mt-1 w-fit font-bold ${child.streak > 0 ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>الاستريك: {child.streak || 0}</p>

@@ -8,7 +8,8 @@ import {
     ArrowRight, Printer, Users, Search, Filter,
     QrCode, CreditCard, ChevronDown, Download
 } from 'lucide-react';
-import { handleImageError } from '../utils/imageUtils';
+import { handleImageError, getAvatarUrl } from '../utils/imageUtils';
+import { resolveChildClassInfo, getAllConfiguredOsras } from '../utils/nameUtils';
 
 // ─────────────────────────────────────────────
 // 🎴 QR ID Card Generator
@@ -29,36 +30,22 @@ export default function QrCardGenerator() {
         return db.children.where('syncKey').equals(currentSyncKey).toArray();
     }, [currentSyncKey, isMaster]);
 
-    // ─── App settings for khedma/osra names ───
-    const appSettings = useMemo(() => {
+    // ─── App settings for khedma/osra names (resolved per child from child.syncKey) ───
+    const rawAppSettings = useMemo(() => {
         try {
-            const saved = localStorage.getItem('appSettings');
-            if (!saved) return { khedmaName: 'الخدمة', osraName: 'الأسرة' };
-            const parsed = JSON.parse(saved);
-
-            if (isMaster) {
-                return {
-                    khedmaName: parsed.services?.[0]?.name || parsed.khedmaName || 'الخدمة',
-                    osraName: 'كل الأسر',
-                };
-            }
-
-            // Find the servant's osra
-            if (parsed.services && Array.isArray(parsed.services)) {
-                for (const service of parsed.services) {
-                    const foundOsra = (service.osras || []).find(
-                        o => String(o.syncKey).trim() === String(currentSyncKey).trim()
-                    );
-                    if (foundOsra) {
-                        return { khedmaName: service.name, osraName: foundOsra.name };
-                    }
-                }
-            }
-            return { khedmaName: parsed.khedmaName || 'الخدمة', osraName: parsed.osraName || 'الأسرة' };
+            return JSON.parse(localStorage.getItem('appSettings') || '{}');
         } catch (_e) {
-            return { khedmaName: 'الخدمة', osraName: 'الأسرة' };
+            return {};
         }
-    }, [currentSyncKey, isMaster]);
+    }, []);
+
+    const getChildCardClassInfo = (child) => {
+        const info = resolveChildClassInfo(child?.syncKey || currentSyncKey, rawAppSettings);
+        return {
+            khedmaName: info.serviceName || 'خدمة مدارس الأحد',
+            osraName: info.osraName || 'الأسرة'
+        };
+    };
 
     // ─── Filtered children ───
     const filteredChildren = useMemo(() => {
@@ -204,15 +191,18 @@ export default function QrCardGenerator() {
                             معاينة الكارنيهات
                         </h3>
                         <div className={`grid gap-4 ${cardSize === 'standard' ? 'grid-cols-2 md:grid-cols-4' : 'grid-cols-2 md:grid-cols-4'}`}>
-                            {filteredChildren.map(child => (
-                                <IdCard
-                                    key={child.id}
-                                    child={child}
-                                    khedmaName={appSettings.khedmaName}
-                                    osraName={appSettings.osraName}
-                                    compact={cardSize === 'compact'}
-                                />
-                            ))}
+                            {filteredChildren.map(child => {
+                                const cardInfo = getChildCardClassInfo(child);
+                                return (
+                                    <IdCard
+                                        key={child.id}
+                                        child={child}
+                                        khedmaName={cardInfo.khedmaName}
+                                        osraName={cardInfo.osraName}
+                                        compact={cardSize === 'compact'}
+                                    />
+                                );
+                            })}
                         </div>
                         {filteredChildren.length === 0 && (
                             <div className="text-center py-16 text-slate-400">
@@ -228,16 +218,19 @@ export default function QrCardGenerator() {
             {/* ─── Print-only Layout (visible ONLY when printing) ─── */}
             <div className="hidden print:block" dir="rtl">
                 <div className={`print-grid ${cardSize === 'compact' ? 'print-grid-compact' : ''}`}>
-                    {filteredChildren.map(child => (
-                        <IdCard
-                            key={child.id}
-                            child={child}
-                            khedmaName={appSettings.khedmaName}
-                            osraName={appSettings.osraName}
-                            compact={cardSize === 'compact'}
-                            forPrint
-                        />
-                    ))}
+                    {filteredChildren.map(child => {
+                        const cardInfo = getChildCardClassInfo(child);
+                        return (
+                            <IdCard
+                                key={child.id}
+                                child={child}
+                                khedmaName={cardInfo.khedmaName}
+                                osraName={cardInfo.osraName}
+                                compact={cardSize === 'compact'}
+                                forPrint
+                            />
+                        );
+                    })}
                 </div>
             </div>
 
@@ -320,7 +313,7 @@ function IdCard({ child, khedmaName, osraName, compact = false, forPrint = false
                 <div style={{ margin: '0 auto', marginBottom: compact ? '4px' : '6px' }}>
                     {child.profilePic ? (
                         <img
-                            src={child.profilePic}
+                            src={getAvatarUrl(child.profilePic)}
                             alt={child.name}
                             onError={handleImageError}
                             style={{
@@ -394,7 +387,7 @@ function IdCard({ child, khedmaName, osraName, compact = false, forPrint = false
             <div className="flex justify-center">
                 {child.profilePic ? (
                     <img
-                        src={child.profilePic}
+                        src={getAvatarUrl(child.profilePic)}
                         alt={child.name}
                         onError={handleImageError}
                         className={`rounded-full object-cover border-2 border-slate-200 ${compact ? 'w-10 h-10' : 'w-14 h-14'}`}

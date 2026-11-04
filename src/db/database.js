@@ -22,7 +22,6 @@ db.version(4).stores({
     attendance: '++id, date, childId, type, syncKey',
     events: 'id, syncKey, date, createdBy',
     grades: '++id, examName, date, childId, grade, maxGrade, syncKey, isDirty, synced',
-
 });
 
 // 🚀 الإصدار 5: Background Auto-Sync — إضافة isDirty و updatedAt و isDeleted لكل الجداول
@@ -31,7 +30,6 @@ db.version(5).stores({
     attendance: '++id, date, childId, type, syncKey, isDirty, updatedAt, isDeleted',
     events: 'id, syncKey, date, createdBy, isDirty, updatedAt, isDeleted',
     grades: '++id, examName, date, childId, grade, maxGrade, syncKey, isDirty, synced, updatedAt',
-
 }).upgrade(tx => {
     const now = new Date().toISOString();
     return Promise.all([
@@ -39,7 +37,6 @@ db.version(5).stores({
         tx.table('attendance').toCollection().modify({ isDirty: true, updatedAt: now, isDeleted: false }),
         tx.table('events').toCollection().modify({ isDirty: true, updatedAt: now, isDeleted: false }),
         tx.table('grades').toCollection().modify({ isDirty: true, updatedAt: now }),
-
     ]);
 });
 
@@ -49,10 +46,8 @@ db.version(6).stores({
     attendance: '++id, date, childId, type, syncKey, isDirty, updatedAt, isDeleted',
     events: 'id, syncKey, date, createdBy, isDirty, updatedAt, isDeleted',
     grades: '++id, examName, date, childId, grade, maxGrade, syncKey, isDirty, synced, updatedAt',
-
 }).upgrade(tx => {
     const now = new Date().toISOString();
-    // 🌟 نضيف childPhone بشكل آمن — لو السجل معهوش الحقل ده نضيفه فارغ ونعمله dirty عشان يتحمّل على السحابة
     return tx.table('children').toCollection().modify(child => {
         if (child.childPhone === undefined) {
             child.childPhone = '';
@@ -68,7 +63,6 @@ db.version(7).stores({
     attendance: '++id, date, childId, type, syncKey, isDirty, updatedAt, isDeleted',
     events: 'id, syncKey, date, createdBy, isDirty, updatedAt, isDeleted',
     grades: '++id, examId, examName, date, childId, grade, maxGrade, syncKey, isDirty, updatedAt, isDeleted',
-
     exams: '++id, firebaseId, syncKey, examName, maxGrade, date, isDirty, updatedAt, isDeleted'
 });
 
@@ -78,7 +72,6 @@ db.version(8).stores({
     attendance: '++id, date, childId, type, syncKey, isDirty, updatedAt, isDeleted',
     events: 'id, syncKey, date, createdBy, isDirty, updatedAt, isDeleted',
     grades: '++id, examId, examName, date, childId, grade, maxGrade, syncKey, isDirty, updatedAt, isDeleted',
-
     exams: '++id, firebaseId, syncKey, examName, maxGrade, date, isDirty, updatedAt, isDeleted'
 });
 
@@ -89,7 +82,6 @@ db.version(9).stores({
     attendance: '++id, date, childId, type, syncKey, status, isDirty, updatedAt, isDeleted',
     events: 'id, syncKey, date, createdBy, isDirty, updatedAt, isDeleted',
     grades: '++id, examId, examName, date, childId, grade, maxGrade, syncKey, isDirty, updatedAt, isDeleted',
-
     exams: '++id, firebaseId, syncKey, examName, maxGrade, date, isDirty, updatedAt, isDeleted'
 });
 
@@ -112,6 +104,16 @@ db.version(12).stores({
 // 🎵 الإصدار 13: إضافة last_tasbeha لتتبع حضور التسبحة
 db.version(13).stores({
     children: 'id, name, syncKey, phone, childPhone, gender, streak, last_liturgy, last_service, last_tasbeha, last_visited, last_birthday_gift, last_reward_date, address, profilePic, isBrother, gotClothes, isDirty, updatedAt, isDeleted, massAttendance, preparation, serviceMeetingAttendance, visitationParticipation, lastConfessionDate, activityParticipation, medicalStatus',
+    servants: 'id, name, syncKey, phone, role, assignedStages, gender, streak, last_liturgy, last_service, last_tasbeha, last_visited, last_birthday_gift, address, profilePic, isDirty, updatedAt, isDeleted, massAttendance, preparation, serviceMeetingAttendance, visitationParticipation, lastConfessionDate, activityParticipation, medicalStatus',
+    attendance: '++id, date, childId, type, syncKey, status, isDirty, updatedAt, isDeleted',
+    events: 'id, syncKey, date, createdBy, isDirty, updatedAt, isDeleted',
+    grades: '++id, examId, examName, date, childId, grade, maxGrade, syncKey, isDirty, updatedAt, isDeleted',
+    exams: '++id, firebaseId, syncKey, examName, maxGrade, date, isDirty, updatedAt, isDeleted'
+});
+
+// 🛡️ الإصدار 14: دعم تتبع الحذف والنقل والتعديل بدقة (deletedAt, deletedBy, lastModifiedBy, movedTo, oldSyncKey)
+db.version(14).stores({
+    children: 'id, name, syncKey, oldSyncKey, movedTo, phone, childPhone, gender, streak, last_liturgy, last_service, last_tasbeha, last_visited, last_birthday_gift, last_reward_date, address, profilePic, isBrother, gotClothes, isDirty, updatedAt, isDeleted, deletedAt, deletedBy, lastModifiedBy, massAttendance, preparation, serviceMeetingAttendance, visitationParticipation, lastConfessionDate, activityParticipation, medicalStatus',
     servants: 'id, name, syncKey, phone, role, assignedStages, gender, streak, last_liturgy, last_service, last_tasbeha, last_visited, last_birthday_gift, address, profilePic, isDirty, updatedAt, isDeleted, massAttendance, preparation, serviceMeetingAttendance, visitationParticipation, lastConfessionDate, activityParticipation, medicalStatus',
     attendance: '++id, date, childId, type, syncKey, status, isDirty, updatedAt, isDeleted',
     events: 'id, syncKey, date, createdBy, isDirty, updatedAt, isDeleted',

@@ -7,7 +7,7 @@ import { doc, collection, collectionGroup, query, where, onSnapshot } from 'fire
 import { db } from '../db/database';
 import { decryptData } from '../encryption';
 import { TENANT_CONFIG } from '../config/tenantConfig';
-import { handleImageError } from '../utils/imageUtils';
+import { handleImageError, getAvatarUrl } from '../utils/imageUtils';
 
 export default function ParentDashboard() {
     const navigate = useNavigate();
@@ -191,7 +191,7 @@ export default function ParentDashboard() {
 
     const displayName = childInfo?.name || childName || 'المخدوم';
     const displayClass = childInfo?.className || childInfo?.osraName || className || TENANT_CONFIG.APP_NAME;
-    const childImg = childInfo?.profilePic || childInfo?.image || childInfo?.photo;
+    const childImg = getAvatarUrl(childInfo?.profilePic || childInfo?.image || childInfo?.photo);
 
     return (
         <div className="min-h-screen bg-slate-50 pb-20 font-sans" dir="rtl">

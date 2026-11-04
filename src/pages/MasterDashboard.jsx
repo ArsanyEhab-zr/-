@@ -3,18 +3,40 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
-// 🌟 استدعاء فايربيز عشان زرار المزامنة
-import { doc, getDoc, onSnapshot, setDoc, writeBatch, collectionGroup, getDocs, collection, deleteDoc } from 'firebase/firestore';
+import { doc, getDoc, getDocFromServer, onSnapshot, setDoc, writeBatch, collectionGroup, getDocs, collection, deleteDoc } from 'firebase/firestore';
 import { encryptData, decryptData } from '../encryption';
 import { firestore } from '../db/firebase';
-import { ArrowRight, ShieldAlert, Users, Search, Phone, Crown, Layers, MessageCircle, UserCircle, Key, AlertTriangle, CheckCircle, RefreshCw, Trash2, Target, CheckSquare, Plus, Edit3, ArrowLeftRight, ChevronDown } from 'lucide-react';
+import {
+    ArrowRight, ShieldAlert, Users, Search, Phone, Crown, Layers, MessageCircle,
+    UserCircle, Key, AlertTriangle, CheckCircle, RefreshCw, Trash2, Target,
+    CheckSquare, Plus, Edit3, ArrowLeftRight, ChevronDown, Loader2, ShieldCheck,
+    RotateCcw, Image as ImageIcon, X
+} from 'lucide-react';
 import ExcelExporter from '../components/ExcelExporter';
 import ServantProfile from '../components/ServantProfile';
 import useAutoSync from '../hooks/useAutoSync';
 import { TENANT_CONFIG } from '../config/tenantConfig';
-import { syncDataWithCloud, reconcileAllClassesWithCloud, reconcileClassChildren } from '../db/sync';
-import { normalizeArabicName } from '../utils/nameUtils';
-import { handleImageError } from '../utils/imageUtils';
+import {
+    syncDataWithCloud,
+    reconcileAllClassesWithCloud,
+    reconcileClassChildren,
+    buildCloudChildDocument,
+    getCurrentServantModificationName,
+    scanDataIntegrityAndRecovery,
+    resolveCrossClassConflictChoice,
+    restoreDeletedOrOrphanChild,
+    restoreBatchAccidentalDeletes,
+    recoverMissingPhotosFromSnapshots,
+    forceCleanMasterSync
+} from '../db/sync';
+import {
+    normalizeArabicName,
+    buildStrictDuplicateKey,
+    getAllConfiguredOsras,
+    resolveChildClassInfo,
+    parseTimestampMs
+} from '../utils/nameUtils';
+import { handleImageError, getAvatarUrl, repairAllExistingImages } from '../utils/imageUtils';
 
 export default function MasterDashboard() {
     const navigate = useNavigate();
@@ -25,8 +47,47 @@ export default function MasterDashboard() {
     const currentServant = JSON.parse(localStorage.getItem('currentServant') || '{}');
 
     // 🌟 جلب الإعدادات في State
-    const [appSettings, setAppSettings] = useState(JSON.parse(localStorage.getItem('appSettings')) || {});
+    const [appSettings, setAppSettings] = useState(JSON.parse(localStorage.getItem('appSettings') || '{}'));
+    const [isRepairingImages, setIsRepairingImages] = useState(false);
+    const [repairProgress, setRepairProgress] = useState({ current: 0, total: 0, repairedCount: 0 });
 
+    // 🛡️ حالة نافذة "فحص واستعادة بيانات الفصول والصور" (Data Audit & Recovery Center)
+    const [isRecoveryModalOpen, setIsRecoveryModalOpen] = useState(false);
+    const [isScanningAudit, setIsScanningAudit] = useState(false);
+    const [isExecutingRecoveryAction, setIsExecutingRecoveryAction] = useState(false);
+    const [auditReport, setAuditReport] = useState({
+        crossClassConflicts: [],
+        deletedOrMissingChildren: [],
+        missingPhotoRecoveries: [],
+        summary: {
+            crossClassCount: 0,
+            deletedOrOrphanCount: 0,
+            accidentalPurgeCount: 0,
+            recoverablePhotosCount: 0
+        }
+    });
+    const [recoveryTargetClassMap, setRecoveryTargetClassMap] = useState({});
+
+    const handleRepairImages = async () => {
+        if (isRepairingImages) return;
+        if (!window.confirm("هل تريد فحص وإصلاح جميع صور المخدومين والخدام وتحويلها إلى نسبة مربعة 1:1 مركزة على الوجه تماماً دون أي مط أو تشويه؟")) {
+            return;
+        }
+        setIsRepairingImages(true);
+        setRepairProgress({ current: 0, total: 0, repairedCount: 0 });
+        try {
+            const result = await repairAllExistingImages((p) => {
+                setRepairProgress(p);
+            });
+            triggerAutoSync();
+            alert(`تم الانتهاء بنجاح! تم فحص ${result.total} صورة وضبط ${result.repairedCount} صورة إلى نسبة 1:1 مربعة تماماً.`);
+        } catch (err) {
+            console.error("خطأ في إصلاح الصور:", err);
+            alert("حدث خطأ أثناء إصلاح بعض الصور.");
+        } finally {
+            setIsRepairingImages(false);
+        }
+    };
 
     // 👑 تحديد الصلاحيات بدقة جراحية
     const isSuperAdmin = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE' || currentServant.role === 'أدمن مساعد';
@@ -36,15 +97,19 @@ export default function MasterDashboard() {
     const hasAccess = isSuperAdmin || isPriest || isAmin || isStageAdmin;
 
     const allowedOsras = useMemo(() => {
+        const allConfigured = getAllConfiguredOsras(appSettings);
+        const fallbackAll = allConfigured.length > 0
+            ? allConfigured
+            : (appSettings.services?.flatMap(s => s.osras || []) || []);
+
         if (isSuperAdmin || isPriest) {
-            return appSettings.services?.flatMap(s => s.osras || []) || [];
+            return fallbackAll;
         } else if (isStageAdmin) {
-            const allOsras = appSettings.services?.flatMap(s => s.osras || []) || [];
-            return allOsras.filter(o => (currentServant.allowedClasses || []).includes(o.syncKey));
+            return fallbackAll.filter(o => (currentServant.allowedClasses || []).includes(o.syncKey));
         } else if (isAmin) {
             const myService = appSettings.services?.find(s => s.osras?.some(o => o.syncKey === currentSyncKey));
             if (myService) return myService.osras || [];
-            return appSettings.services?.flatMap(s => s.osras || []) || [];
+            return fallbackAll;
         }
         return [];
     }, [appSettings, isSuperAdmin, isPriest, isAmin, isStageAdmin, currentSyncKey, currentServant.allowedClasses]);
@@ -62,13 +127,13 @@ export default function MasterDashboard() {
             rawKids = await db.children.where('syncKey').equals(currentSyncKey).toArray();
         }
         
-        // Strict Canonical Deduplication & Scoping:
+        // Strict Canonical Deduplication & Scoping (Part 3):
         // 1. Exclude soft-deleted records (isDeleted: true)
         // 2. Exclude orphaned kids not belonging to any active allowedOsras
-        // 3. Deduplicate by canonical child ID and normalized name within the same class
+        // 3. Deduplicate ONLY by exact child ID or strict 4-part name + non-empty phone in the same class
         const validAllowedKeys = new Set(allowedOsras.map(o => String(o.syncKey || '').trim()).filter(Boolean));
         const seenIds = new Set();
-        const seenNameByClass = new Set();
+        const seenStrictKeys = new Set();
         const dedupedKids = [];
 
         for (const kid of rawKids) {
@@ -82,25 +147,22 @@ export default function MasterDashboard() {
             const kidId = String(kid.id || '').trim();
             if (!kidId || seenIds.has(kidId)) continue;
 
-            const normName = normalizeArabicName(kid.name);
-            const nameClassKey = `${kidSyncKey}___${normName}`;
-            if (normName && seenNameByClass.has(nameClassKey)) {
-                // Ghost duplicate from pre-migration with identical name in same class
+            const strictKey = buildStrictDuplicateKey(kid, kidSyncKey);
+            if (strictKey && seenStrictKeys.has(strictKey)) {
                 continue;
             }
 
             seenIds.add(kidId);
-            if (normName) seenNameByClass.add(nameClassKey);
+            if (strictKey) seenStrictKeys.add(strictKey);
             dedupedKids.push(kid);
         }
 
         return dedupedKids;
     }, [hasAccess, isSuperAdmin, isPriest, isStageAdmin, currentSyncKey, currentServant.allowedClasses, allowedOsras]);
+
     const [selectedOsraKey, setSelectedOsraKey] = useState(sessionStorage.getItem('master_osraKey') || null);
     const [searchTerm, setSearchTerm] = useState(sessionStorage.getItem('master_search') || '');
     const [genderFilter, setGenderFilter] = useState(sessionStorage.getItem('master_gender') || 'ALL');
-
-    // 🌟 المتغير الجديد للتبديل بين الأطفال والخدام 🌟
     const [viewMode, setViewMode] = useState(sessionStorage.getItem('master_viewMode') || 'KIDS'); // 'KIDS' | 'SERVANTS'
 
     // 🌟 متابعة أنشطة الخدمة
@@ -111,6 +173,153 @@ export default function MasterDashboard() {
     // 👤 بروفايل الخادم (Modal State)
     const [selectedServantForProfile, setSelectedServantForProfile] = useState(null);
     const [isServantProfileOpen, setIsServantProfileOpen] = useState(false);
+
+    // 🛡️ دوال مركز الفحص والاستعادة (Data Audit & Recovery Center)
+    const runAuditScan = async () => {
+        setIsScanningAudit(true);
+        try {
+            const report = await scanDataIntegrityAndRecovery(allowedOsras, appSettings);
+            setAuditReport(report);
+
+            const initialTargets = {};
+            for (const item of report.deletedOrMissingChildren) {
+                initialTargets[item.childId] = item.syncKey || allowedOsras[0]?.syncKey || '';
+            }
+            setRecoveryTargetClassMap(initialTargets);
+        } catch (err) {
+            console.error('❌ [Recovery Center] Scan error:', err);
+            alert('حدث خطأ أثناء فحص البيانات: ' + err.message);
+        } finally {
+            setIsScanningAudit(false);
+        }
+    };
+
+    const handleOpenRecoveryModal = () => {
+        setIsRecoveryModalOpen(true);
+        runAuditScan();
+    };
+
+    const handleResolveConflict = async (conflictItem, chosenSyncKey) => {
+        setIsExecutingRecoveryAction(true);
+        try {
+            await resolveCrossClassConflictChoice(conflictItem, chosenSyncKey);
+            await runAuditScan();
+        } catch (err) {
+            alert('حدث خطأ أثناء توحيد الفصل: ' + err.message);
+        } finally {
+            setIsExecutingRecoveryAction(false);
+        }
+    };
+
+    const handleResolveAllConflictsAuto = async () => {
+        if (auditReport.crossClassConflicts.length === 0) return;
+        setIsExecutingRecoveryAction(true);
+        try {
+            for (const conflict of auditReport.crossClassConflicts) {
+                if (conflict.recommendedSyncKey) {
+                    await resolveCrossClassConflictChoice(conflict, conflict.recommendedSyncKey);
+                }
+            }
+            await runAuditScan();
+            alert(`✅ تم تثبيت وتوحيد فصول ${auditReport.crossClassConflicts.length} مخدوم بنجاح!`);
+        } catch (err) {
+            alert('حدث خطأ أثناء حل التضاربات: ' + err.message);
+        } finally {
+            setIsExecutingRecoveryAction(false);
+        }
+    };
+
+    const handleRestoreSingleChild = async (item) => {
+        const chosenKey = recoveryTargetClassMap[item.childId] || item.syncKey || allowedOsras[0]?.syncKey || '';
+        if (!chosenKey) {
+            alert('اختر الفصل أولاً لاستعادة المخدوم إليه.');
+            return;
+        }
+        setIsExecutingRecoveryAction(true);
+        try {
+            const ok = await restoreDeletedOrOrphanChild(item, chosenKey);
+            if (ok) {
+                await runAuditScan();
+            } else {
+                alert('تعذر استعادة المخدوم. تأكد من اختيار فصل صحيح.');
+            }
+        } catch (err) {
+            alert('حدث خطأ أثناء الاستعادة: ' + err.message);
+        } finally {
+            setIsExecutingRecoveryAction(false);
+        }
+    };
+
+    const handleBatchRestoreAccidental = async () => {
+        const accidentalCount = auditReport.deletedOrMissingChildren.filter(d => d.isAccidentalPurge).length;
+        if (accidentalCount === 0) {
+            alert('لا توجد سجلات محذوفة تلقائياً بدون اسم خادم.');
+            return;
+        }
+        if (!window.confirm(`هل تريد استعادة ${accidentalCount} مخدوم (تم إخفاؤهم أو حذفهم تلقائياً بالخطأ بدون اسم خادم) إلى فصولهم فوراً؟`)) {
+            return;
+        }
+        setIsExecutingRecoveryAction(true);
+        try {
+            const count = await restoreBatchAccidentalDeletes(
+                auditReport.deletedOrMissingChildren,
+                allowedOsras[0]?.syncKey || ''
+            );
+            await runAuditScan();
+            alert(`✅ تم استعادة ${count} مخدوم إلى فصولهم بنجاح!`);
+        } catch (err) {
+            alert('حدث خطأ أثناء الاستعادة الجماعية: ' + err.message);
+        } finally {
+            setIsExecutingRecoveryAction(false);
+        }
+    };
+
+    const handleRecoverSinglePhoto = async (photoItem) => {
+        setIsExecutingRecoveryAction(true);
+        try {
+            await recoverMissingPhotosFromSnapshots([photoItem]);
+            await runAuditScan();
+        } catch (err) {
+            alert('حدث خطأ أثناء استعادة الصورة: ' + err.message);
+        } finally {
+            setIsExecutingRecoveryAction(false);
+        }
+    };
+
+    const handleRecoverAllPhotos = async () => {
+        if (auditReport.missingPhotoRecoveries.length === 0) return;
+        setIsExecutingRecoveryAction(true);
+        try {
+            const count = await recoverMissingPhotosFromSnapshots(auditReport.missingPhotoRecoveries);
+            await runAuditScan();
+            alert(`✅ تم استعادة ${count} صورة مفقودة بنجاح!`);
+        } catch (err) {
+            alert('حدث خطأ أثناء استعادة الصور: ' + err.message);
+        } finally {
+            setIsExecutingRecoveryAction(false);
+        }
+    };
+
+    const handleForceCleanMasterSync = async () => {
+        if (!window.confirm("هل تريد تنفيذ مزامنة قسرية موحدة لجميع الفصول؟\nسيتم توحيد الفصول المتضاربة، استعادة الصور المفقودة، ورفع الحالة المعتمدة للسحابة ليظهر نفس العدد والفصل عند كل الخدام والكهنة وفي شيت الإكسيل.")) {
+            return;
+        }
+        setIsExecutingRecoveryAction(true);
+        try {
+            const res = await forceCleanMasterSync(allowedOsras);
+            await runAuditScan();
+            alert(
+                `✅ تمت المزامنة القسرية الموحدة بنجاح!\n` +
+                `• مخدومون معتمدون تم توحيدهم على السحابة: ${res.pushedCount}\n` +
+                `• تضاربات فصول تم حسمها: ${res.resolvedCrossClass}\n` +
+                `• صور مفقودة تمت استعادتها: ${res.recoveredPhotos}`
+            );
+        } catch (err) {
+            alert('حدث خطأ أثناء المزامنة القسرية الموحدة: ' + err.message);
+        } finally {
+            setIsExecutingRecoveryAction(false);
+        }
+    };
 
     useEffect(() => {
         if (!hasAccess) return;
@@ -160,12 +369,10 @@ export default function MasterDashboard() {
 
     const [isRefreshing, setIsRefreshing] = useState(false);
 
-    // 🌟🌟 Auto-Pull: سحب الداتا السحابية والهيكل المركزي تلقائياً عند فتح الصفحة 🌟🌟
     const performCloudSync = async (silent = false) => {
         if (!navigator.onLine || !hasAccess) return;
         setIsRefreshing(true);
         try {
-            // 1. Fetch system structure (mainConfig)
             const settingsRef = doc(firestore, 'System', 'mainConfig');
             let snap;
             try {
@@ -182,25 +389,25 @@ export default function MasterDashboard() {
 
                 const mergedSettings = {
                     ...localSettings,
-                    services: cloudConfig.services || [],
-                    servants: cloudConfig.servants || []
+                    ...cloudConfig,
+                    services: cloudConfig.services || localSettings.services || [],
+                    servants: cloudConfig.servants || localSettings.servants || []
                 };
 
                 localStorage.setItem('appSettings', JSON.stringify(mergedSettings));
                 setAppSettings(mergedSettings);
 
-                const cloudOsras = (cloudConfig.services || []).flatMap(s => s.osras || []).filter(o => o.syncKey);
+                const configured = getAllConfiguredOsras(mergedSettings);
+                const cloudOsras = configured.length > 0
+                    ? configured
+                    : (cloudConfig.services || []).flatMap(s => s.osras || []).filter(o => o.syncKey);
                 if (cloudOsras.length > 0) {
                     freshOsras = cloudOsras;
                 }
-                console.log('🔄 [MasterDashboard] Auto-pulled structure from cloud.');
             }
 
-            // 2. Strict Global Reconciliation across all classes in allowedOsras
-            console.log('🔄 [MasterDashboard] Reconciling all classes to eliminate ghost and duplicate records...');
             await reconcileAllClassesWithCloud(freshOsras.length > 0 ? freshOsras : allowedOsras);
 
-            // 3. Trigger full cloud data sync
             const result = await syncDataWithCloud();
             if (!silent && result?.success) {
                 console.log('✅ [MasterDashboard] Cloud sync completed successfully.');
@@ -215,7 +422,6 @@ export default function MasterDashboard() {
     useEffect(() => {
         performCloudSync(true);
 
-        // Also auto-refresh when mobile app / tab regains focus or visibility
         const handleVisibilityOrFocus = () => {
             if (navigator.onLine && document.visibilityState === 'visible') {
                 performCloudSync(true);
@@ -266,7 +472,6 @@ export default function MasterDashboard() {
         return c.childPhone || c.fatherPhone || c.motherPhone || c.phone || '';
     };
 
-
     // 🔄 أداة ترحيل المخدومين بين الفصول
     const [showTransferTool, setShowTransferTool] = useState(false);
     const [transferSourceKey, setTransferSourceKey] = useState('');
@@ -308,7 +513,8 @@ export default function MasterDashboard() {
         try {
             const batch = writeBatch(firestore);
             let transferredCount = 0;
-            const now = new Date().toISOString();
+            const now = Date.now();
+            const modifier = getCurrentServantModificationName();
 
             for (const childId of transferSelectedIds) {
                 try {
@@ -318,24 +524,42 @@ export default function MasterDashboard() {
                     const oldDocRef = doc(firestore, 'Osras', transferSourceKey, 'children', String(child.id));
                     const newDocRef = doc(firestore, 'Osras', transferTargetKey, 'children', String(child.id));
 
-                    // قراءة الداتا المشفرة من المصدر
                     const oldSnap = await getDoc(oldDocRef);
-                    if (!oldSnap.exists()) continue;
+                    let decryptedData = child;
+                    if (oldSnap.exists()) {
+                        const rawData = oldSnap.data();
+                        decryptedData = (rawData.payload ? decryptData(rawData.payload) : rawData) || child;
+                    }
 
-                    const rawData = oldSnap.data();
-                    const decryptedData = rawData.payload ? decryptData(rawData.payload) : rawData;
-                    if (!decryptedData) continue;
+                    // 1. Write active record to new class
+                    const activeData = {
+                        ...child,
+                        ...decryptedData,
+                        id: String(child.id),
+                        syncKey: transferTargetKey,
+                        oldSyncKey: null,
+                        movedTo: null,
+                        isDeleted: false,
+                        deletedAt: null,
+                        deletedBy: null,
+                        lastModifiedBy: modifier,
+                        updatedAt: now,
+                        isDirty: false
+                    };
+                    batch.set(newDocRef, buildCloudChildDocument(activeData), { merge: true });
 
-                    // تحديث الـ syncKey للفصل الجديد
-                    decryptedData.syncKey = transferTargetKey;
-                    decryptedData.updatedAt = now;
+                    // 2. Write atomic move-tombstone to old class (Part 2.2) so child NEVER exists as active in two classes!
+                    const oldTombstone = {
+                        ...activeData,
+                        syncKey: transferSourceKey,
+                        isDeleted: true,
+                        movedTo: transferTargetKey,
+                        deletedAt: now,
+                        deletedBy: 'نقل إلى فصل آخر',
+                        updatedAt: now
+                    };
+                    batch.set(oldDocRef, buildCloudChildDocument(oldTombstone), { merge: true });
 
-                    const newPayload = rawData.payload
-                        ? { payload: encryptData(decryptedData) }
-                        : decryptedData;
-
-                    batch.set(newDocRef, newPayload);
-                    batch.delete(oldDocRef);
                     transferredCount++;
                 } catch (err) {
                     console.error('Failed to transfer child:', childId, err);
@@ -374,7 +598,6 @@ export default function MasterDashboard() {
 
                 if (attTransferredCount > 0) {
                     await attBatch.commit();
-                    console.log(`✅ [Transfer] Migrated ${attTransferredCount} attendance records to ${transferTargetKey}`);
                 }
             } catch (attErr) {
                 console.warn('[Transfer] Attendance transfer warning:', attErr.message);
@@ -386,32 +609,19 @@ export default function MasterDashboard() {
                 // تحديث Dexie محلياً لجميع السجلات (أطفال، حضور، درجات)
                 for (const childId of transferSelectedIds) {
                     const strId = String(childId).trim();
-                    const numId = Number(strId);
-
                     try {
-                        await db.children.where('id').equals(strId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
-                        if (!isNaN(numId) && Number.isFinite(numId)) {
-                            await db.children.where('id').equals(numId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
-                        }
-
+                        await db.children.where('id').equals(strId).modify({
+                            syncKey: transferTargetKey,
+                            oldSyncKey: null,
+                            movedTo: null,
+                            isDeleted: false,
+                            lastModifiedBy: modifier,
+                            isDirty: false,
+                            updatedAt: now
+                        });
                         await db.attendance.where('childId').equals(strId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
-                        if (!isNaN(numId) && Number.isFinite(numId)) {
-                            await db.attendance.where('childId').equals(numId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
-                        }
-
                         await db.grades.where('childId').equals(strId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
-                        if (!isNaN(numId) && Number.isFinite(numId)) {
-                            await db.grades.where('childId').equals(numId).modify({ syncKey: transferTargetKey, isDirty: false, updatedAt: now });
-                        }
-                    } catch (_e) { /* skip if record not in local table */ }
-                }
-
-                // 🔄 تشغيل المصالحة الصارمة على الفصلين لمنع تكرار أي سجلات على الإطلاق
-                try {
-                    await reconcileClassChildren(transferSourceKey);
-                    await reconcileClassChildren(transferTargetKey);
-                } catch (recErr) {
-                    console.warn('[Transfer] Post-transfer reconciliation warning:', recErr.message);
+                    } catch (_e) {}
                 }
 
                 alert(`✅ تم ترحيل ${transferredCount} مخدوم وبياناتهم بنجاح!`);
@@ -430,12 +640,10 @@ export default function MasterDashboard() {
         }
     };
 
-
     const activeOsra = selectedOsraKey === 'ALL_CHURCH'
         ? { name: (isSuperAdmin || isPriest) ? 'الكل (جميع المخدومين)' : TENANT_CONFIG.MASTER_VIEW_NAME, logo: '' }
         : allowedOsras.find(o => o.syncKey === selectedOsraKey);
 
-    // 🌟 الفلترة الذكية للأطفال (مغلفة بـ useMemo)
     const osraChildren = useMemo(() => {
         if (!children) return [];
         return children.filter(child => {
@@ -456,22 +664,18 @@ export default function MasterDashboard() {
         });
     }, [children, selectedOsraKey, allowedOsras, genderFilter, searchTerm]);
 
-    // 🌟 الفلترة الذكية للخدام (الميزة الجديدة لأبونا)
     const osraServants = useMemo(() => {
         let list = appSettings.servants || [];
 
-        // 1. فلترة بالصلاحيات (الأمين بيشوف خدام أسرته بس)
         if (!isSuperAdmin && !isPriest) {
             const allowedKeys = allowedOsras.map(o => o.syncKey);
             list = list.filter(s => allowedKeys.includes(s.syncKey));
         }
 
-        // 2. فلترة بالأسرة المحددة
         if (selectedOsraKey && selectedOsraKey !== 'ALL_CHURCH') {
             list = list.filter(s => s.syncKey === selectedOsraKey);
         }
 
-        // 3. فلترة بالبحث
         if (searchTerm) {
             const term = searchTerm.toLowerCase();
             list = list.filter(s => s.name?.toLowerCase().includes(term) || s.phone?.includes(term));
@@ -534,8 +738,9 @@ export default function MasterDashboard() {
                 await db.children.update(childId, {
                     notes: updatedNotes,
                     isDirty: true,
-                    updatedAt: new Date().toISOString()
+                    updatedAt: Date.now()
                 });
+                triggerAutoSync();
             }
         } catch (error) {
             console.error('Error resolving intervention:', error);
@@ -560,6 +765,14 @@ export default function MasterDashboard() {
                     </div>
                     <div className="flex items-center gap-2">
                         <button
+                            onClick={handleOpenRecoveryModal}
+                            title="فحص واستعادة بيانات الفصول والصور"
+                            className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white active:scale-95 px-3 py-2 rounded-xl text-xs font-black transition-all shrink-0 shadow-md"
+                        >
+                            <ShieldCheck size={15} />
+                            <span className="hidden sm:inline">فحص واستعادة الداتا</span>
+                        </button>
+                        <button
                             onClick={() => performCloudSync(false)}
                             disabled={isRefreshing}
                             title="تحديث ومزامنة البيانات مع السحابة فوراً"
@@ -574,7 +787,18 @@ export default function MasterDashboard() {
 
             <main className="p-4 max-w-4xl mx-auto mt-4">
 
-
+                {/* 🛡️ الزر البارز لفتح مركز فحص واستعادة انضباط الداتا والصور (Part 5) */}
+                {!selectedOsraKey && (
+                    <div className="mb-4">
+                        <button
+                            onClick={handleOpenRecoveryModal}
+                            className="w-full p-4 rounded-2xl font-black text-white shadow-lg flex items-center justify-center gap-2.5 transition-all bg-linear-to-r from-emerald-600 via-teal-600 to-indigo-700 hover:opacity-95 active:scale-[0.99]"
+                        >
+                            <ShieldCheck size={22} />
+                            <span>🛡️ فحص واستعادة انضباط الداتا والصور</span>
+                        </button>
+                    </div>
+                )}
 
                 {/* 🔄 أداة ترحيل المخدومين بين الفصول - Super Admin فقط */}
                 {isSuperAdmin && !selectedOsraKey && (
@@ -590,7 +814,6 @@ export default function MasterDashboard() {
 
                         {showTransferTool && (
                             <div className="mt-3 bg-white p-5 rounded-3xl border-2 border-indigo-100 shadow-lg">
-                                {/* الفصل المصدر والوجهة */}
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
                                     <div>
                                         <label className="block text-xs font-black text-slate-600 mb-2">📤 فصل المصدر</label>
@@ -620,7 +843,6 @@ export default function MasterDashboard() {
                                     </div>
                                 </div>
 
-                                {/* جدول المخدومين */}
                                 {transferSourceKey && transferSourceChildren.length > 0 && (
                                     <div>
                                         <div className="flex items-center justify-between mb-3">
@@ -661,7 +883,6 @@ export default function MasterDashboard() {
                                     <p className="text-center text-sm font-bold text-slate-400 py-6">لا يوجد مخدومين في هذا الفصل.</p>
                                 )}
 
-                                {/* زر التنفيذ */}
                                 {transferSelectedIds.size > 0 && transferTargetKey && (
                                     <button
                                         onClick={executeTransfer}
@@ -742,8 +963,26 @@ export default function MasterDashboard() {
                             </div>
 
                             {!isStageAdmin && (
-                                <div className="col-span-1 sm:col-span-2 mt-2">
-                                    <ExcelExporter />
+                                <div className="col-span-1 sm:col-span-2 mt-2 flex flex-col sm:flex-row gap-3">
+                                    <div className="flex-1">
+                                        <ExcelExporter />
+                                    </div>
+                                    <div className="flex-1">
+                                        <button
+                                            onClick={handleRepairImages}
+                                            disabled={isRepairingImages}
+                                            className="flex items-center justify-center gap-2 w-full py-4 rounded-2xl bg-amber-50 border-2 border-amber-200 text-amber-800 font-black hover:bg-amber-100 transition-all shadow-sm active:scale-95 disabled:opacity-60"
+                                        >
+                                            {isRepairingImages ? (
+                                                <>
+                                                    <Loader2 className="animate-spin" size={20} />
+                                                    <span>جاري ضبط الصور: {repairProgress.current} / {repairProgress.total}</span>
+                                                </>
+                                            ) : (
+                                                <span>🛠️ إصلاح وضبط جميع الصور الحالية (1:1)</span>
+                                            )}
+                                        </button>
+                                    </div>
                                 </div>
                             )}
 
@@ -785,8 +1024,6 @@ export default function MasterDashboard() {
                 {/* 🌟 الشاشة التانية: العرض الداخلي (أطفال / خدام) */}
                 {selectedOsraKey && activeOsra && (
                     <div className="animate-in slide-in-from-left duration-300 space-y-4">
-
-                        {/* الهيدر بتاع الأسرة المحددة */}
                         <div className="bg-white p-4 rounded-4xl shadow-sm border border-slate-200 flex items-center justify-between">
                             <div className="flex items-center gap-3">
                                 {activeOsra.logo ? (
@@ -804,7 +1041,6 @@ export default function MasterDashboard() {
                             </button>
                         </div>
 
-                        {/* 🌟 زراير التبديل بين الأطفال والخدام 🌟 */}
                         <div className="flex gap-2 bg-slate-200/50 p-1.5 rounded-2xl mb-4">
                             <button onClick={() => setViewMode('KIDS')} className={`flex-1 py-3 text-xs font-black rounded-xl transition-all flex justify-center items-center gap-2 ${viewMode === 'KIDS' ? 'bg-white text-indigo-800 shadow-sm border border-slate-200' : 'text-slate-500 hover:bg-slate-200'}`}>
                                 👦👧 المخدومين ({osraChildren.length})
@@ -825,7 +1061,6 @@ export default function MasterDashboard() {
                             />
                         </div>
 
-                        {/* الفلتر بيظهر للأطفال بس */}
                         {viewMode === 'KIDS' && (
                             <div className="flex gap-2 bg-slate-200/50 p-1 rounded-2xl mb-4">
                                 <button onClick={() => setGenderFilter('ALL')} className={`flex-1 py-2.5 text-xs font-black rounded-xl transition-all ${genderFilter === 'ALL' ? 'bg-white text-slate-800 shadow-sm border border-slate-200' : 'text-slate-500 hover:bg-slate-200'}`}>الكل</button>
@@ -835,7 +1070,6 @@ export default function MasterDashboard() {
                         )}
 
                         <div className="space-y-3 pt-2">
-                            {/* 🌟 عرض الخدام 🌟 */}
                             {viewMode === 'SERVANTS' ? (
                                 osraServants.length === 0 ? (
                                     <div className="text-center py-10 bg-white rounded-[2.5rem] border border-dashed border-slate-300">
@@ -849,7 +1083,7 @@ export default function MasterDashboard() {
 
                                             <div className="flex items-center gap-3 pr-2">
                                                 {servant.photoURL || servant.profileImage || servant.profilePic ? (
-                                                    <img src={servant.photoURL || servant.profileImage || servant.profilePic} alt={servant.name} onError={handleImageError} className="w-11 h-11 rounded-full object-cover border-2 border-amber-200 shadow-sm shrink-0" />
+                                                    <img src={getAvatarUrl(servant.photoURL || servant.profileImage || servant.profilePic)} alt={servant.name} onError={handleImageError} className="w-11 h-11 rounded-full object-cover border-2 border-amber-200 shadow-sm shrink-0" />
                                                 ) : (
                                                     <div className="w-11 h-11 rounded-full bg-amber-50 flex items-center justify-center text-amber-600 font-black text-sm border-2 border-amber-200 shrink-0">
                                                         {(servant.name || 'خ').substring(0, 2)}
@@ -884,7 +1118,6 @@ export default function MasterDashboard() {
                                     ))
                                 )
                             ) : (
-                                /* 🌟 عرض المخدومين (الأطفال) 🌟 */
                                 osraChildren.length === 0 ? (
                                     <div className="text-center py-10 bg-white rounded-[2.5rem] border border-dashed border-slate-300">
                                         <Users className="text-slate-300 mx-auto mb-3" size={40} />
@@ -894,21 +1127,34 @@ export default function MasterDashboard() {
                                     osraChildren.map(child => {
                                         const genderTxt = String(child.gender || '').trim();
                                         const isGirl = ['بنت', 'أنثى', 'انثى', 'انثي', 'فتاة'].includes(genderTxt);
+                                        const classInfo = resolveChildClassInfo(child.syncKey, appSettings);
 
                                         return (
                                             <div key={child.id} className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4 relative overflow-hidden group">
                                                 <div className={`absolute top-0 right-0 w-1.5 h-full ${isGirl ? 'bg-pink-400' : 'bg-blue-400'}`}></div>
 
-                                                <div className="pr-2">
-                                                    <h3 className="font-black text-slate-800 flex items-center gap-2">
-                                                        {child.name}
-                                                        <span className={`text-[10px] px-2 py-0.5 rounded-md ${isGirl ? 'bg-pink-50 text-pink-500' : 'bg-blue-50 text-blue-500'}`}>
-                                                            {child.gender || 'غير محدد'}
-                                                        </span>
-                                                    </h3>
-                                                    <p className="text-[11px] font-bold text-slate-400 mt-1 flex items-center gap-1">
-                                                        <Phone size={10} /> {getDisplayPhone(child)}
-                                                    </p>
+                                                <div className="flex items-center gap-3 pr-2">
+                                                    <div className="w-11 h-11 rounded-full bg-slate-100 overflow-hidden flex items-center justify-center text-lg shrink-0 border border-slate-200">
+                                                        {child.profilePic ? (
+                                                            <img src={getAvatarUrl(child.profilePic)} alt={child.name} onError={handleImageError} className="w-full h-full object-cover" />
+                                                        ) : (
+                                                            isGirl ? '👧' : '👦'
+                                                        )}
+                                                    </div>
+                                                    <div>
+                                                        <h3 className="font-black text-slate-800 flex items-center gap-2 flex-wrap">
+                                                            {child.name}
+                                                            <span className={`text-[10px] px-2 py-0.5 rounded-md ${isGirl ? 'bg-pink-50 text-pink-500' : 'bg-blue-50 text-blue-500'}`}>
+                                                                {child.gender || 'غير محدد'}
+                                                            </span>
+                                                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-black">
+                                                                {classInfo.osraName}
+                                                            </span>
+                                                        </h3>
+                                                        <p className="text-[11px] font-bold text-slate-400 mt-1 flex items-center gap-1">
+                                                            <Phone size={10} /> {getDisplayPhone(child)}
+                                                        </p>
+                                                    </div>
                                                 </div>
 
                                                 <div className="flex items-center gap-2">
@@ -927,7 +1173,7 @@ export default function MasterDashboard() {
                                                     </button>
                                                 </div>
                                             </div>
-                                        )
+                                        );
                                     })
                                 )
                             )}
@@ -969,7 +1215,6 @@ export default function MasterDashboard() {
                             </div>
 
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                {/* Targeted */}
                                 <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
                                     <h4 className="font-black text-slate-700 mb-4 flex items-center gap-2">
                                         <Target size={18} className="text-blue-500" /> الأنشطة المستهدفة في الخدمة
@@ -1006,7 +1251,6 @@ export default function MasterDashboard() {
                                     </div>
                                 </div>
 
-                                {/* Executed */}
                                 <div className="bg-green-50/30 p-4 rounded-2xl border border-green-100">
                                     <h4 className="font-black text-slate-700 mb-4 flex items-center gap-2">
                                         <CheckCircle size={18} className="text-green-500" /> الأنشطة المنفذة
@@ -1066,7 +1310,7 @@ export default function MasterDashboard() {
                                         if (window.confirm("⚠️ تحذير شديد: هل أنت متأكد من تصفير العدادات لجميع الفصول بالكامل؟")) {
                                             if (window.confirm("تأكيد أخير: الداتا هتتصفر لجميع الفصول ومش هترجع، كمل؟")) {
                                                 try {
-                                                    const now = new Date().toISOString();
+                                                    const now = Date.now();
                                                     const allKids = await db.children.toArray();
                                                     const updates = allKids.map(c => db.children.update(c.id, { streak: 0, last_liturgy: null, last_service: null, last_tasbeha: null, last_visited: null, isDirty: true, updatedAt: now }));
                                                     await Promise.all(updates);
@@ -1095,9 +1339,10 @@ export default function MasterDashboard() {
                                             const pass = prompt(`اكتب كلمة (${confirmPass}) للتأكيد النهائي:`);
                                             if (pass === confirmPass) {
                                                 try {
-                                                    const now = new Date().toISOString();
+                                                    const now = Date.now();
+                                                    const modifier = getCurrentServantModificationName();
                                                     const allKids = await db.children.toArray();
-                                                    await Promise.all(allKids.map(c => db.children.update(c.id, { isDeleted: true, isDirty: true, updatedAt: now })));
+                                                    await Promise.all(allKids.map(c => db.children.update(c.id, { isDeleted: true, deletedAt: now, deletedBy: modifier, isDirty: true, updatedAt: now })));
                                                     
                                                     const allAtt = await db.attendance.toArray();
                                                     await Promise.all(allAtt.map(a => db.attendance.update(a.id, { isDeleted: true, isDirty: true, updatedAt: now })));
@@ -1122,6 +1367,324 @@ export default function MasterDashboard() {
                     </div>
                 )}
             </main>
+
+            {/* 🛠️ نافذة مركز فحص واستعادة بيانات الفصول والصور (PART 5: Data Audit & Recovery Center) */}
+            {isRecoveryModalOpen && (
+                <div className="fixed inset-0 z-50 bg-slate-900/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 overflow-y-auto" dir="rtl">
+                    <div className="bg-white w-full max-w-4xl rounded-3xl shadow-2xl border border-slate-200 overflow-hidden my-auto max-h-[92vh] flex flex-col">
+                        {/* Modal Header */}
+                        <div className="bg-linear-to-r from-slate-900 via-indigo-950 to-emerald-950 text-white p-5 flex items-center justify-between shrink-0">
+                            <div className="flex items-center gap-3">
+                                <div className="w-11 h-11 rounded-2xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-300">
+                                    <ShieldCheck size={24} />
+                                </div>
+                                <div>
+                                    <h2 className="text-base sm:text-lg font-black">🛠️ فحص واستعادة بيانات الفصول والصور</h2>
+                                    <p className="text-[11px] font-bold text-slate-300 mt-0.5">
+                                        تشخيص شامل للسحابة والجهاز المحلي قبل طباعة الكارنيهات وشيتات الإكسيل
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={runAuditScan}
+                                    disabled={isScanningAudit || isExecutingRecoveryAction}
+                                    className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-black flex items-center gap-1.5 transition-all"
+                                >
+                                    <RefreshCw size={14} className={isScanningAudit ? 'animate-spin' : ''} />
+                                    <span>إعادة الفحص</span>
+                                </button>
+                                <button
+                                    onClick={() => setIsRecoveryModalOpen(false)}
+                                    className="w-9 h-9 rounded-full bg-white/10 hover:bg-red-500/80 flex items-center justify-center transition-colors"
+                                >
+                                    <X size={18} />
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Modal Body */}
+                        <div className="p-4 sm:p-6 overflow-y-auto space-y-6 flex-1 bg-slate-50">
+                            {isScanningAudit ? (
+                                <div className="py-16 flex flex-col items-center justify-center text-slate-500 gap-3">
+                                    <Loader2 className="animate-spin text-indigo-600" size={40} />
+                                    <p className="font-black text-sm">جاري فحص جميع فصول السحابة ومقارنتها بالداتا المحلية والصور...</p>
+                                </div>
+                            ) : (
+                                <>
+                                    {/* Summary Cards */}
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                        <div className="bg-white p-4 rounded-2xl border border-amber-200 shadow-sm">
+                                            <div className="text-xs font-black text-amber-800">تضارب بين الفصول</div>
+                                            <div className="text-2xl font-black text-amber-600 mt-1">{auditReport.summary.crossClassCount}</div>
+                                            <div className="text-[10px] font-bold text-slate-400 mt-0.5">مخدوم مكرر في أكثر من فصل</div>
+                                        </div>
+                                        <div className="bg-white p-4 rounded-2xl border border-rose-200 shadow-sm">
+                                            <div className="text-xs font-black text-rose-800">مخدومون مخفيون / محذوفون</div>
+                                            <div className="text-2xl font-black text-rose-600 mt-1">
+                                                {auditReport.summary.deletedOrOrphanCount}
+                                                {auditReport.summary.accidentalPurgeCount > 0 && (
+                                                    <span className="text-xs font-black bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full mr-2">
+                                                        منهم {auditReport.summary.accidentalPurgeCount} تلقائي
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="text-[10px] font-bold text-slate-400 mt-0.5">قابلون للاستعادة الفورية</div>
+                                        </div>
+                                        <div className="bg-white p-4 rounded-2xl border border-emerald-200 shadow-sm">
+                                            <div className="text-xs font-black text-emerald-800">صور قابلة للاستعادة</div>
+                                            <div className="text-2xl font-black text-emerald-600 mt-1">{auditReport.summary.recoverablePhotosCount}</div>
+                                            <div className="text-[10px] font-bold text-slate-400 mt-0.5">وجدت في نسخ احتياطية سحابية/محلية</div>
+                                        </div>
+                                    </div>
+
+                                    {/* 1. تقرير الأطفال المتكررين بين فصلين (Cross-Class Conflicts) */}
+                                    <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                                            <div>
+                                                <h3 className="text-sm font-black text-slate-800 flex items-center gap-2">
+                                                    <ArrowLeftRight size={18} className="text-amber-500" />
+                                                    1. تقرير الأطفال المتكررين بين فصلين (Cross-Class Conflicts)
+                                                </h3>
+                                                <p className="text-[11px] font-bold text-slate-400 mt-0.5">
+                                                    اضغط على الفصل الصحيح لتثبيت المخدوم فيه وحذف النسخ الشبحية من الفصول الأخرى
+                                                </p>
+                                            </div>
+                                            {auditReport.crossClassConflicts.length > 0 && (
+                                                <button
+                                                    onClick={handleResolveAllConflictsAuto}
+                                                    disabled={isExecutingRecoveryAction}
+                                                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-black shadow-sm transition-all shrink-0"
+                                                >
+                                                    توحيد الكل تلقائياً للأحدث ({auditReport.crossClassConflicts.length})
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {auditReport.crossClassConflicts.length === 0 ? (
+                                            <div className="py-6 text-center text-xs font-black text-emerald-600 bg-emerald-50/60 rounded-2xl border border-emerald-100">
+                                                ✅ لا يوجد أي مخدوم مكرر بين فصلين — جميع الفصول معزولة ومنضبطة 100%.
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
+                                                {auditReport.crossClassConflicts.map(conflict => (
+                                                    <div key={conflict.childId} className="p-3.5 rounded-2xl bg-amber-50/50 border border-amber-200 flex flex-col gap-3">
+                                                        <div className="flex items-center justify-between gap-3">
+                                                            <div className="flex items-center gap-3">
+                                                                <img
+                                                                    src={getAvatarUrl(conflict.profilePic)}
+                                                                    onError={handleImageError}
+                                                                    alt={conflict.name}
+                                                                    className="w-10 h-10 rounded-full object-cover border border-amber-300"
+                                                                />
+                                                                <div>
+                                                                    <div className="font-black text-sm text-slate-800">{conflict.name}</div>
+                                                                    <div className="text-[10px] font-bold text-slate-500">كود: {conflict.childId}</div>
+                                                                </div>
+                                                            </div>
+                                                            <span className="text-[10px] font-black bg-amber-100 text-amber-800 px-2.5 py-1 rounded-lg">
+                                                                مقترح: {conflict.recommendedOsraName}
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {conflict.copies.map((copy, idx) => (
+                                                                <button
+                                                                    key={`${conflict.childId}_${copy.syncKey}_${idx}`}
+                                                                    onClick={() => handleResolveConflict(conflict, copy.syncKey)}
+                                                                    disabled={isExecutingRecoveryAction}
+                                                                    className={`px-3 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 ${
+                                                                        copy.syncKey === conflict.recommendedSyncKey
+                                                                            ? 'bg-indigo-600 text-white shadow-sm hover:bg-indigo-700'
+                                                                            : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-100'
+                                                                    }`}
+                                                                >
+                                                                    <CheckCircle size={13} />
+                                                                    <span>تثبيت في: {copy.osraName}</span>
+                                                                    {copy.isDeleted && <span className="text-[9px] opacity-75">(مقبرة سابقة)</span>}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* 2. استعادة الأطفال المخفيين أو المحذوفين بالخطأ (Deleted / Missing Children Recovery) */}
+                                    <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                                            <div>
+                                                <h3 className="text-sm font-black text-slate-800 flex items-center gap-2">
+                                                    <RotateCcw size={18} className="text-rose-500" />
+                                                    2. استعادة الأطفال المخفيين أو المحذوفين بالخطأ (Deleted / Missing Recovery)
+                                                </h3>
+                                                <p className="text-[11px] font-bold text-slate-400 mt-0.5">
+                                                    يعرض الأطفال المحذوفين أو المفقود منهم كود الفصل مع اسم من قام بالحذف وتوقيته
+                                                </p>
+                                            </div>
+                                            {auditReport.summary.accidentalPurgeCount > 0 && (
+                                                <button
+                                                    onClick={handleBatchRestoreAccidental}
+                                                    disabled={isExecutingRecoveryAction}
+                                                    className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-black shadow-md transition-all shrink-0 flex items-center gap-1.5"
+                                                >
+                                                    <RotateCcw size={14} />
+                                                    <span>استعادة كل المحذوفين بالخطأ تلقائياً ({auditReport.summary.accidentalPurgeCount})</span>
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {auditReport.deletedOrMissingChildren.length === 0 ? (
+                                            <div className="py-6 text-center text-xs font-black text-emerald-600 bg-emerald-50/60 rounded-2xl border border-emerald-100">
+                                                ✅ لا يوجد أطفال محذوفون أو مخفيون بدون فصل.
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+                                                {auditReport.deletedOrMissingChildren.map(item => {
+                                                    const deletedDateStr = item.deletedAt
+                                                        ? new Date(parseTimestampMs(item.deletedAt)).toLocaleString('ar-EG')
+                                                        : 'غير مسجل';
+                                                    return (
+                                                        <div key={item.childId} className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                                            <div className="flex items-center gap-3">
+                                                                <img
+                                                                    src={getAvatarUrl(item.profilePic)}
+                                                                    onError={handleImageError}
+                                                                    alt={item.name}
+                                                                    className="w-10 h-10 rounded-full object-cover border border-slate-300 shrink-0"
+                                                                />
+                                                                <div>
+                                                                    <div className="font-black text-sm text-slate-800 flex items-center gap-2 flex-wrap">
+                                                                        <span>{item.name}</span>
+                                                                        <span className={`text-[10px] px-2 py-0.5 rounded-md font-black ${
+                                                                            item.isAccidentalPurge
+                                                                                ? 'bg-amber-100 text-amber-800'
+                                                                                : 'bg-rose-100 text-rose-700'
+                                                                        }`}>
+                                                                            {item.isAccidentalPurge ? 'حذف تلقائي / بدون اسم خادم' : `حذفه: ${item.deletedBy}`}
+                                                                        </span>
+                                                                    </div>
+                                                                    <div className="text-[10px] font-bold text-slate-500 mt-0.5">
+                                                                        الفصل السابق: {item.osraName} • وقت الحذف: {deletedDateStr}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+
+                                                            <div className="flex items-center gap-2 shrink-0">
+                                                                <select
+                                                                    value={recoveryTargetClassMap[item.childId] || item.syncKey || ''}
+                                                                    onChange={(e) => setRecoveryTargetClassMap(prev => ({
+                                                                        ...prev,
+                                                                        [item.childId]: e.target.value
+                                                                    }))}
+                                                                    className="px-2.5 py-2 rounded-xl bg-white border border-slate-300 text-xs font-black text-slate-700"
+                                                                >
+                                                                    <option value="">-- اختر الفصل --</option>
+                                                                    {allowedOsras.map(o => (
+                                                                        <option key={o.syncKey} value={o.syncKey}>{o.name}</option>
+                                                                    ))}
+                                                                </select>
+                                                                <button
+                                                                    onClick={() => handleRestoreSingleChild(item)}
+                                                                    disabled={isExecutingRecoveryAction}
+                                                                    className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-sm transition-all flex items-center gap-1"
+                                                                >
+                                                                    <RotateCcw size={13} />
+                                                                    <span>استعادة للفصل</span>
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* 3. استعادة الصور المفقودة (Photo Recovery) */}
+                                    <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                                            <div>
+                                                <h3 className="text-sm font-black text-slate-800 flex items-center gap-2">
+                                                    <ImageIcon size={18} className="text-indigo-500" />
+                                                    3. استعادة الصور المفقودة (Photo Recovery)
+                                                </h3>
+                                                <p className="text-[11px] font-bold text-slate-400 mt-0.5">
+                                                    يفحص جميع الفصول والنسخ المحلية لاستعادة أي صورة اختفت من السجل النشط للمخدوم
+                                                </p>
+                                            </div>
+                                            {auditReport.missingPhotoRecoveries.length > 0 && (
+                                                <button
+                                                    onClick={handleRecoverAllPhotos}
+                                                    disabled={isExecutingRecoveryAction}
+                                                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black shadow-sm transition-all shrink-0"
+                                                >
+                                                    استعادة كل الصور المفقودة ({auditReport.missingPhotoRecoveries.length})
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {auditReport.missingPhotoRecoveries.length === 0 ? (
+                                            <div className="py-6 text-center text-xs font-black text-emerald-600 bg-emerald-50/60 rounded-2xl border border-emerald-100">
+                                                ✅ جميع الصور المتاحة محفوظة ومحمية في السجلات النشطة للمخدومين.
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-2.5 max-h-60 overflow-y-auto pr-1">
+                                                {auditReport.missingPhotoRecoveries.map(photoItem => (
+                                                    <div key={photoItem.childId} className="p-3 rounded-2xl bg-indigo-50/50 border border-indigo-200 flex items-center justify-between gap-3">
+                                                        <div className="flex items-center gap-3">
+                                                            <img
+                                                                src={getAvatarUrl(photoItem.recoveredProfilePic)}
+                                                                onError={handleImageError}
+                                                                alt={photoItem.name}
+                                                                className="w-11 h-11 rounded-full object-cover border-2 border-indigo-400"
+                                                            />
+                                                            <div>
+                                                                <div className="font-black text-sm text-slate-800">{photoItem.name}</div>
+                                                                <div className="text-[10px] font-bold text-indigo-700">
+                                                                    الفصل: {photoItem.osraName} • المصدر: {photoItem.sourceDescription}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => handleRecoverSinglePhoto(photoItem)}
+                                                            disabled={isExecutingRecoveryAction}
+                                                            className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black shadow-sm transition-all"
+                                                        >
+                                                            استعادة الصورة
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                        {/* 4. مزامنة قسرية موحدة (Force Clean Master Sync) - Modal Footer */}
+                        <div className="p-4 sm:p-5 bg-white border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0">
+                            <button
+                                onClick={handleForceCleanMasterSync}
+                                disabled={isScanningAudit || isExecutingRecoveryAction}
+                                className="w-full sm:flex-1 py-3.5 px-5 rounded-2xl bg-linear-to-r from-emerald-600 to-indigo-700 hover:opacity-95 text-white font-black text-sm shadow-lg flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                            >
+                                {isExecutingRecoveryAction ? (
+                                    <Loader2 size={18} className="animate-spin" />
+                                ) : (
+                                    <RefreshCw size={18} />
+                                )}
+                                <span>4. مزامنة قسرية موحدة (Force Clean Master Sync)</span>
+                            </button>
+                            <button
+                                onClick={() => setIsRecoveryModalOpen(false)}
+                                className="w-full sm:w-auto px-6 py-3.5 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-black text-xs transition-colors"
+                            >
+                                إغلاق النافذة
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* 👤 ServantProfile Modal (Admin View - Read Only) */}
             <ServantProfile

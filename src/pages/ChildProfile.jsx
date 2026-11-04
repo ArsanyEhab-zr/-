@@ -4,7 +4,9 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
 import useAutoSync from '../hooks/useAutoSync';
 import { ArrowRight, Phone, Save, History, CheckCircle2, AlertTriangle } from 'lucide-react';
-import { handleImageError } from '../utils/imageUtils';
+import { handleImageError, getAvatarUrl } from '../utils/imageUtils';
+import { saveAndSyncChildEdit, getCurrentServantModificationName } from '../db/sync';
+import { resolveChildClassInfo } from '../utils/nameUtils';
 
 const ChildProfile = () => {
     const { triggerAutoSync } = useAutoSync();
@@ -27,26 +29,34 @@ const ChildProfile = () => {
         if (!aiSummary || isSaving || !child) return;
         setIsSaving(true);
         
-        const now = new Date().toISOString();
+        const nowIso = new Date().toISOString();
+        const nowMs = Date.now();
         const currentServant = JSON.parse(localStorage.getItem('currentServant') || '{}');
+        const servantName = currentServant.name || getCurrentServantModificationName();
+        const classInfo = resolveChildClassInfo(child.syncKey);
         const newNote = {
-            id: Date.now(),
+            id: nowMs,
             text: aiSummary,
-            date: now,
+            date: nowIso,
             requiresIntervention: isInterventionRequired,
             interventionStatus: isInterventionRequired ? 'pending' : 'resolved',
-            servantName: currentServant.name || 'خادم غير معروف',
+            servantName,
             childName: child.name || 'مخدوم',
-            osraName: currentServant.assignedOsra || child.stage || 'غير محدد'
+            osraName: classInfo.osraName || currentServant.assignedOsra || child.stage || 'غير محدد'
         };
         
         const updatedNotes = child.notes ? [...child.notes, newNote] : [newNote];
-        await db.children.update(child.id, { 
-            notes: updatedNotes, 
-            last_visited: now.split('T')[0],
-            isDirty: true,
-            updatedAt: now
-        });
+        await saveAndSyncChildEdit(
+            child.id,
+            {
+                notes: updatedNotes,
+                last_visited: nowIso.split('T')[0],
+                lastModifiedBy: servantName,
+                updatedAt: nowMs,
+                isDirty: true
+            },
+            servantName
+        );
 
         setIsSaving(false);
         setAiSummary('');
@@ -72,7 +82,7 @@ const ChildProfile = () => {
                 <div className="flex items-center justify-between mb-8 bg-white/80 backdrop-blur-md p-4 rounded-[2.5rem] shadow-sm border border-slate-200">
                     <div className="flex items-center gap-4">
                         <div className={`w-14 h-14 rounded-full ${themeBg} flex items-center justify-center text-3xl shadow-inner overflow-hidden`}>
-                            {child.profilePic ? <img src={child.profilePic} width="56" height="56" loading="eager" onError={handleImageError} className="w-full h-full object-cover" alt={child.name} /> : (isGirl ? '👧' : '👦')}
+                            {child.profilePic ? <img src={getAvatarUrl(child.profilePic)} width="56" height="56" loading="eager" onError={handleImageError} className="w-full h-full object-cover" alt={child.name} /> : (isGirl ? '👧' : '👦')}
                         </div>
                         <div>
                             <h1 className="text-xl md:text-2xl font-black text-slate-800 flex items-center gap-2 flex-wrap">

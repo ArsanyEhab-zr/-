@@ -5,20 +5,19 @@ import { Link } from 'react-router-dom';
 import { Search, MapPin, ClipboardList, Navigation, MessageCircleWarning, CheckCircle2, Map, Crosshair, MapPinned, Loader2, AlertTriangle, Mic } from 'lucide-react';
 import BottomNav from '../components/BottomNav';
 import useAutoSync from '../hooks/useAutoSync';
-import { handleImageError } from '../utils/imageUtils';
+import { handleImageError, getAvatarUrl } from '../utils/imageUtils';
+import { saveAndSyncChildEdit, getCurrentServantModificationName } from '../db/sync';
 
 export default function Visitation() {
     const { triggerAutoSync } = useAutoSync();
     const [activeFilter, setActiveFilter] = useState("all");
     const [searchQuery, setSearchQuery] = useState("");
 
-    // 🧠 حالة الطفل المحدد
     const [selectedChildId, setSelectedChildId] = useState(null);
     const [isLocating, setIsLocating] = useState(false);
 
     const today = new Date().toISOString().split('T')[0];
 
-    // 🔐 عزل البيانات: كل أسرة تشوف أطفالها بس
     const currentSyncKey = String(localStorage.getItem('currentSyncKey') || '');
     const isMaster = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE';
     const children = useLiveQuery(async () => {
@@ -52,9 +51,6 @@ export default function Visitation() {
         return acc;
     }, {});
 
-    // ==========================================
-    // 📍 وظائف الافتقاد وتحديد رقم الواتساب الذكي
-    // ==========================================
     const cleanPhoneNumber = (phone) => {
         let clean = String(phone || "").replace(/\D/g, '');
         if (clean.startsWith('0')) clean = '2' + clean;
@@ -62,7 +58,6 @@ export default function Visitation() {
         return clean;
     };
 
-    // 🌟 الدالة السحرية لتحديد الرقم الصح
     const getTargetPhone = (child) => {
         if (child.whatsappTarget === 'child' && child.childPhone) return child.childPhone;
         if (child.whatsappTarget === 'father' && child.fatherPhone) return child.fatherPhone;
@@ -84,8 +79,12 @@ export default function Visitation() {
 
     const markAsVisited = async (child) => {
         try {
-            const now = new Date().toISOString();
-            await db.children.update(child.id, { last_visited: today, isDirty: true, updatedAt: now });
+            const modifier = getCurrentServantModificationName();
+            await saveAndSyncChildEdit(
+                child.id,
+                { last_visited: today, isDirty: true, updatedAt: Date.now(), lastModifiedBy: modifier },
+                modifier
+            );
             triggerAutoSync();
             alert("تم الافتقاد بنجاح! ✅");
             setSelectedChildId(null);
@@ -101,8 +100,12 @@ export default function Visitation() {
             const lat = position.coords.latitude;
             const lon = position.coords.longitude;
             const googleMapsUrl = `https://www.google.com/maps?q=${lat},${lon}`;
-            const now = new Date().toISOString();
-            await db.children.update(child.id, { gpsLink: googleMapsUrl, isDirty: true, updatedAt: now });
+            const modifier = getCurrentServantModificationName();
+            await saveAndSyncChildEdit(
+                child.id,
+                { gpsLink: googleMapsUrl, isDirty: true, updatedAt: Date.now(), lastModifiedBy: modifier },
+                modifier
+            );
             triggerAutoSync();
             setIsLocating(false);
             alert("تم حفظ اللوكيشن بنجاح! 📍");
@@ -171,7 +174,6 @@ export default function Visitation() {
 
                                     return (
                                         <React.Fragment key={child.id}>
-                                            {/* الفقاعة (الدبوس) */}
                                             <div className="relative flex flex-col items-center">
                                                 <button
                                                     onClick={() => setSelectedChildId(isSelected ? null : child.id)}
@@ -181,7 +183,7 @@ export default function Visitation() {
                                                     {isVisitedRecently && <span className="absolute -top-1 -left-1 z-10 bg-green-500 text-white rounded-full p-0.5 shadow-sm"><CheckCircle2 size={12} /></span>}
 
                                                     <div className={`w-14 h-14 rounded-full border-4 ${isSelected ? 'border-indigo-600 shadow-xl shadow-indigo-500/40' : (isVisitedRecently ? 'border-green-400 opacity-70' : 'border-white shadow-md')} overflow-hidden bg-slate-100 flex items-center justify-center text-xl`}>
-                                                        {child.profilePic ? <img src={child.profilePic} width="56" height="56" loading="lazy" onError={handleImageError} className="w-full h-full object-cover" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
+                                                        {child.profilePic ? <img src={getAvatarUrl(child.profilePic)} width="56" height="56" loading="lazy" onError={handleImageError} className="w-full h-full object-cover" alt={child.name} /> : (child.gender === 'بنت' ? '👧' : '👦')}
                                                     </div>
                                                     <div className={`w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-8 ${isSelected ? 'border-t-indigo-600' : (isVisitedRecently ? 'border-t-green-400 opacity-70' : 'border-t-white')}`}></div>
 
@@ -191,7 +193,6 @@ export default function Visitation() {
                                                 </button>
                                             </div>
 
-                                            {/* 🗂️ كارت التفاصيل بعد إزالة المايك */}
                                             {isSelected && (
                                                 <div className="w-full basis-full mt-1 mb-2 animate-in slide-in-from-top-2 duration-300">
                                                     <div className="bg-white rounded-4xl p-5 border-2 border-indigo-100 shadow-xl relative overflow-hidden">
@@ -207,7 +208,6 @@ export default function Visitation() {
                                                             {child.streak === 0 && <span className="text-[10px] text-red-600 bg-red-50 px-2.5 py-1 rounded-lg font-black border border-red-100 animate-pulse">🚨 خطر تسرب!</span>}
                                                         </div>
 
-                                                        {/* 📍 زرار الـ GPS */}
                                                         <div className="bg-slate-50 p-3 rounded-2xl mb-4 border border-slate-100 flex items-center justify-between">
                                                             <div>
                                                                 <span className="text-[10px] font-black text-slate-500 block">الموقع (GPS)</span>
@@ -228,7 +228,6 @@ export default function Visitation() {
                                                             )}
                                                         </div>
 
-                                                        {/* الملاحظة السابقة لو موجودة */}
                                                         {latestNote && (
                                                             <div className="bg-amber-50 p-3 rounded-2xl border border-amber-100/50 mb-4">
                                                                 <span className="font-black text-amber-700 mb-1 text-[10px] flex items-center gap-1"><ClipboardList size={12} /> أهم المهام (من الزيارة السابقة):</span>
@@ -236,7 +235,6 @@ export default function Visitation() {
                                                             </div>
                                                         )}
 
-                                                        {/* 🌟 زراير الأكشن (ضفنا زرار للبروفايل عشان المايك) */}
                                                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
                                                             <a href={generateOnMyWayMsg(child)} target="_blank" rel="noreferrer" className="bg-yellow-400 text-yellow-900 py-3 rounded-xl text-xs font-black flex items-center justify-center gap-1 shadow-sm hover:bg-yellow-500 transition-all">
                                                                 <Navigation size={14} /> جايلك
@@ -247,7 +245,6 @@ export default function Visitation() {
                                                             <button onClick={() => markAsVisited(child)} disabled={isVisitedRecently} className={`py-3 rounded-xl text-xs font-black flex items-center justify-center gap-1 transition-all ${isVisitedRecently ? 'bg-slate-200 text-slate-500' : 'bg-slate-800 text-white shadow-md hover:bg-slate-900'}`}>
                                                                 <CheckCircle2 size={14} /> {isVisitedRecently ? 'تم الافتقاد' : 'تأكيد'}
                                                             </button>
-                                                            {/* 🌟 الزرار الجديد اللي هيوديك للمايك الجبار */}
                                                             <Link to={`/profile/${child.id}`} className="bg-purple-100 text-purple-700 py-3 rounded-xl text-xs font-black flex items-center justify-center gap-1 shadow-sm hover:bg-purple-200 transition-all border border-purple-200">
                                                                 <Mic size={14} /> تلخيص بالمايك
                                                             </Link>

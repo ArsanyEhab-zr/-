@@ -107,8 +107,31 @@ export function isCleanChildId(id) {
 }
 
 /**
+ * Generates a deterministic 4-character lowercase alphanumeric code from a string seed.
+ * Ensures that migrating a legacy ID on multiple devices produces the exact same clean ID.
+ */
+export function deterministicCodeFromSeed(seed, length = 4) {
+    const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
+    const str = String(seed || '').trim();
+    if (!str) return generateRandomCode(length);
+    let h1 = 2166136261;
+    for (let i = 0; i < str.length; i++) {
+        h1 ^= str.charCodeAt(i);
+        h1 = Math.imul(h1, 16777619);
+    }
+    let result = '';
+    let val = h1 >>> 0;
+    for (let i = 0; i < length; i++) {
+        result += chars[val % chars.length];
+        val = Math.floor(val / chars.length) ^ ((h1 >>> (i * 4)) & 0xff);
+    }
+    return result;
+}
+
+/**
  * Ensures an ID is clean. If valid, returns the trimmed ID;
- * otherwise generates a new clean structured ID.
+ * if a non-empty legacy ID is provided, maps it deterministically to a clean structured ID
+ * so different devices/sync cycles never generate conflicting random IDs for the same child.
  * 
  * @param {any} id 
  * @param {string} gender 
@@ -121,6 +144,17 @@ export function ensureCleanChildId(id, gender, year, existingIds = null) {
         const clean = String(id).trim();
         if (existingIds) existingIds.add(clean);
         return clean;
+    }
+    const rawStr = id !== null && id !== undefined ? String(id).trim() : '';
+    if (rawStr && rawStr !== 'undefined' && rawStr !== 'null' && rawStr !== 'لم يتم إنشاء كود' && rawStr !== 'غير متوفر') {
+        const g = normalizeGenderToken(gender);
+        const y = year || new Date().getFullYear();
+        const detCode = deterministicCodeFromSeed(rawStr, 4);
+        const detCandidate = `${y}-${g}-${detCode}`;
+        if (!existingIds || !existingIds.has(detCandidate)) {
+            if (existingIds) existingIds.add(detCandidate);
+            return detCandidate;
+        }
     }
     return generateChildId(gender, year, existingIds);
 }

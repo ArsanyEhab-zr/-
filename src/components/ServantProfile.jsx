@@ -5,7 +5,7 @@ import { doc, getDoc, updateDoc, setDoc, collection, query, where, getDocs } fro
 import { firestore } from '../db/firebase';
 import { db } from '../db/database';
 import { uploadImageToCloudinary } from '../utils/cloudinary';
-import { compressImageToBase64, handleImageError } from '../utils/imageUtils';
+import { compressImageToBase64, handleImageError, getAvatarUrl } from '../utils/imageUtils';
 
 // 🎨 Role badge config — color-coded for visual hierarchy
 const ROLE_BADGES = {
@@ -389,7 +389,7 @@ export default function ServantProfile({ servantData = null, isOpen = false, onC
                     <div className="relative group">
                         {photoURL ? (
                             <img
-                                src={photoURL}
+                                src={getAvatarUrl(photoURL)}
                                 alt={servant.name}
                                 onError={handleImageError}
                                 className="w-28 h-28 rounded-full object-cover border-4 border-white shadow-xl bg-slate-100"

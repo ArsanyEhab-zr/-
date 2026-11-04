@@ -3,7 +3,7 @@ import { db } from '../db/database';
 import { Gift, MapPin, CheckCircle2, Edit3, Phone } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import useAutoSync from '../hooks/useAutoSync';
-import { handleImageError } from '../utils/imageUtils';
+import { handleImageError, getAvatarUrl } from '../utils/imageUtils';
 
 const AttendanceCard = ({ child, onEdit }) => {
     const [attendedToday, setAttendedToday] = useState(false);
@@ -96,7 +96,7 @@ const AttendanceCard = ({ child, onEdit }) => {
                     <Link to={`/child/${child.id}`}>
                         <div className={`w-12 h-12 rounded-2xl bg-linear-to-br from-${themeColor}-100 to-${themeColor}-50 border border-${themeColor}-200 flex items-center justify-center text-lg font-black text-${themeColor}-600 shadow-inner`}>
                             {child.profilePic ? (
-                                <img src={child.profilePic} alt={child.name} className="w-full h-full rounded-2xl object-cover" onError={handleImageError} />
+                                <img src={getAvatarUrl(child.profilePic)} alt={child.name} className="w-full h-full rounded-2xl object-cover" onError={handleImageError} />
                             ) : (
                                 isGirl ? '👧' : '👦'
                             )}

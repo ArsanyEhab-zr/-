@@ -7,7 +7,7 @@ import {
     MessageCircle, ExternalLink, Filter, Calendar, Phone, Check,
     HeartHandshake, Clock, ShieldAlert
 } from 'lucide-react';
-import { handleImageError } from '../utils/imageUtils';
+import { handleImageError, getAvatarUrl } from '../utils/imageUtils';
 
 // 🛠️ دالة مساعدة لتحويل أي صيغة تاريخ أو Timestamp إلى ميلي ثانية بدقة
 const parseTimestamp = (v) => {
@@ -440,7 +440,7 @@ export default function SmartAlertsCard({ isMaster = false, allOsras = [], activ
                                             <div className="w-12 h-12 rounded-full overflow-hidden bg-white border-2 border-slate-200 shrink-0 shadow-sm flex items-center justify-center text-lg">
                                                 {child.profilePic ? (
                                                     <img
-                                                        src={child.profilePic}
+                                                        src={getAvatarUrl(child.profilePic)}
                                                         alt={child.name}
                                                         width="48"
                                                         height="48"
